@@ -4,7 +4,6 @@ This repository contains implementations and experiments for counterfactual expl
 
 ## Project Structure
 
-- `RelativeCE.ipynb`: Main Jupyter notebook with the implementation.
 
 ## Dependencies
 
@@ -20,8 +19,5 @@ This project uses Gurobi optimizer, which requires a valid license. Make sure to
 
 ## Usage
 
-Open and run the `RelativeCE.ipynb` notebook in Jupyter.
 
 ## Contributing
-
-Please refer to the notebook for detailed code and explanations.
