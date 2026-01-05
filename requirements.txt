@@ -1,3 +1,6 @@
 numpy
 matplotlib
 gurobipy
+pandas
+matplotlib
+seaborn

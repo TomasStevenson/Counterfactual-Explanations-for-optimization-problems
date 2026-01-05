@@ -1,0 +1,27 @@
+\ Model WCE_master_copy
+\ LP format - for model browsing. Use MPS format to capture full model detail.
+\ Signature: 0x158db0c78e96d97
+Minimize
+ 
+Subject To
+ W_demand[0]: - D[0] + gW[0,0] + gW[1,0] + gW[2,0] >= 0
+ W_demand[1]: - D[1] + gW[0,1] + gW[1,1] + gW[2,1] >= 0
+ W_cap[0,0]: gW[0,0] - 6 uW[0] <= 0
+ W_cap[0,1]: gW[0,1] - 6 uW[0] <= 0
+ desired_u1_on: uW[0] = 1
+ select_one_pattern: z[0,1,1] = 1
+ theta_le_l[0,1,1,0]: - 2.1 D[0] - 2.1 D[1] + theta_lb + 1e+06 z[0,1,1]
+   <= 1.000001e+06
+ witness_le_theta_lb: 2 gW[0,0] + 2 gW[0,1] + 2.1 gW[1,0] + 2.1 gW[1,1]
+   + 6 gW[2,0] + 6 gW[2,1] + 3 uW[0] + uW[1] - theta_lb <= 0
+Bounds
+ D[0] free
+ D[1] free
+ gW[0,0] free
+ gW[0,1] free
+ gW[1,0] free
+ gW[1,1] free
+ theta_lb free
+Binaries
+ uW[0] uW[1] z[0,1,1]
+End

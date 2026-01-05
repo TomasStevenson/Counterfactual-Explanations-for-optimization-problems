@@ -1,0 +1,22 @@
+\ Model MK_master_copy
+\ LP format - for model browsing. Use MPS format to capture full model detail.
+\ Signature: 0x5923fa244113dd8e
+Minimize
+ 
+Subject To
+ Bdef: - db + B = 12
+ W_cover: - B + 5 xW[0] + 4 xW[1] + 4 xW[2] + 4 xW[3] >= 0
+ desired_item0_on: yW[0] = 1
+ theta_le_l[0,1,1,1,0]: - 0.25 B + theta_lb <= 0
+ witness_le_theta_lb: xW[0] + xW[1] + xW[2] + xW[3] + 10 yW[0] - theta_lb
+   <= 0
+Bounds
+ -infinity <= db <= 2
+ B free
+ xW[0] free
+ theta_lb free
+Binaries
+ yW[0]
+Generals
+ db
+End
