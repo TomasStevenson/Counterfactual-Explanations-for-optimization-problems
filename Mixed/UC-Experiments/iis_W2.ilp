@@ -1,0 +1,20 @@
+\ Model feas_check_copy
+\ LP format - for model browsing. Use MPS format to capture full model detail.
+\ Signature: 0x8368094b838bbae4
+Minimize
+ 
+Subject To
+ balance[0]: p[0,0] + p[1,0] + p[2,0] + pR[0,0] - splus[0] + sminus[0]
+   = 800
+ ren_avail[0,0]: pR[0,0] + curt[0,0] = 0
+ sminus_max[0]: sminus[0] <= 50
+ ramp_up_init[0]: p[0,0] <= 400
+ ramp_up_init[1]: p[1,0] <= 100
+ ramp_up_init[2]: p[2,0] <= 150
+Bounds
+ p[0,0] free
+ p[1,0] free
+ p[2,0] free
+ pR[0,0] free
+ sminus[0] free
+End
