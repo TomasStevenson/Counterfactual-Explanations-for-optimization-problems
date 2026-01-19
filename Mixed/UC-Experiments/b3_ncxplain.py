@@ -205,33 +205,27 @@ def _build_and_solve_b3_mp(
 
     # Diagnostics for infeasible
     if mp.Status == GRB.INFEASIBLE:
-        lp_path = f"{infeas_iis_prefix}.lp"
-        ilp_path = f"{infeas_iis_prefix}.ilp"
-        mp.write(lp_path)
-        mp.computeIIS()
-        mp.write(ilp_path)
+
         return {
             "status": "MP_INFEASIBLE",
             "mp_status": int(mp.Status),
-            "message": f"MP infeasible. Wrote {lp_path} and IIS {ilp_path}.",
+            "message": f"MP infeasible.",
         }
 
     if mp.Status == GRB.TIME_LIMIT and mp.SolCount == 0:
-        lp_path = f"{infeas_iis_prefix}_nosol.lp"
-        mp.write(lp_path)
+
         return {
             "status": "MP_NO_SOLUTION",
             "mp_status": int(mp.Status),
-            "message": f"MP hit TIME_LIMIT with no solution. Wrote {lp_path}.",
+            "message": f"MP hit TIME_LIMIT with no solution.",
         }
 
     if mp.Status not in (GRB.OPTIMAL, GRB.TIME_LIMIT):
-        lp_path = f"{infeas_iis_prefix}_status{int(mp.Status)}.lp"
-        mp.write(lp_path)
+
         return {
             "status": "MP_FAILED",
             "mp_status": int(mp.Status),
-            "message": f"MP failed with status={int(mp.Status)}. Wrote {lp_path}.",
+            "message": f"MP failed with status={int(mp.Status)}.",
         }
 
     pi_plus_new = np.array([[Dp[b, t].X for t in range(T)] for b in range(nB)], dtype=float)
@@ -834,7 +828,7 @@ def run_E3_ncxplain_shift_and_curt_prices_emissions(
     top_k: int = 5,                    # only used if emissions_mode="top_k_hours"
 
     # MP variable bounds
-    price_lb: float = -500.0,
+    price_lb: float = 0.0,
     price_ub: float = 500.0,
     curt_lb: float = 0.0,
     curt_ub: float = 200.0,
