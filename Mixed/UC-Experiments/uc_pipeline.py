@@ -215,6 +215,14 @@ def build_network_uc_model(
     m = gp.Model("network_uc")
     m.Params.OutputFlag = int(output_flag)
 
+    # IMPORTANT: B&S needs names for getConstrByName(...)
+    # If IgnoreNames=1 anywhere, constraint-name lookup will fail.
+    try:
+        m.Params.IgnoreNames = 0
+    except gp.GurobiError:
+        pass
+
+    
     # Variables
     u = m.addVars(nG, T, vtype=GRB.BINARY, name="u")
     v = m.addVars(nG, T, vtype=GRB.BINARY, name="v")
@@ -499,3 +507,271 @@ def solve_uc_with_cost(
 
 def total_curtailment(sol: Dict) -> float:
     return float(np.sum(sol["curt"]))
+
+
+
+
+# ============================================================
+# 4b) UC model builder with RHS-mutable line limits
+# ============================================================
+
+from typing import Sequence, Union
+
+FmaxType = Union[float, gp.Var, gp.LinExpr]
+
+def build_network_uc_model_4b(
+    data: NetworkUCData,
+    window_size: int,
+    per_bus_neutrality: bool,
+    u_init: np.ndarray,
+    p_init: np.ndarray,
+    on_time_init: np.ndarray,
+    off_time_init: np.ndarray,
+    output_flag: int = 0,
+    fmax_override: Optional[Sequence[FmaxType]] = None,  # NEW
+):
+    """
+    Same as build_network_uc_model(...), but line limits can be overridden by:
+      fmax_override[ell] (float or gurobi var/expr), time-invariant across t.
+    If fmax_override is None, uses data.lines[ell].fmax (original behavior).
+    """
+    nG = len(data.gens)
+    nR = len(data.rens)
+    nL = len(data.lines)
+    nB = int(data.nB)
+    T = int(data.T)
+
+    if fmax_override is not None:
+        if len(fmax_override) != nL:
+            raise ValueError("fmax_override must have length equal to number of lines (nL).")
+
+    m = gp.Model("network_uc_4b")
+    m.Params.OutputFlag = int(output_flag)
+
+    # Variables
+    u = m.addVars(nG, T, vtype=GRB.BINARY, name="u")
+    v = m.addVars(nG, T, vtype=GRB.BINARY, name="v")
+    w = m.addVars(nG, T, vtype=GRB.BINARY, name="w")
+    p = m.addVars(nG, T, lb=0.0, vtype=GRB.CONTINUOUS, name="p")
+
+    curt = m.addVars(nR, T, lb=0.0, vtype=GRB.CONTINUOUS, name="curt")
+    splus = m.addVars(nB, T, lb=0.0, vtype=GRB.CONTINUOUS, name="splus")
+    sminus = m.addVars(nB, T, lb=0.0, vtype=GRB.CONTINUOUS, name="sminus")
+
+    theta = m.addVars(nB, T, lb=-GRB.INFINITY, vtype=GRB.CONTINUOUS, name="theta")
+    f = m.addVars(nL, T, lb=-GRB.INFINITY, vtype=GRB.CONTINUOUS, name="f")
+
+    var = {
+        "u": u, "v": v, "w": w, "p": p,
+        "curt": curt, "splus": splus, "sminus": sminus,
+        "theta": theta, "f": f,
+    }
+
+    # -----------------------------
+    # Generator constraints
+    # -----------------------------
+    for g, gen in enumerate(data.gens):
+        Pmin, Pmax = float(gen.Pmin), float(gen.Pmax)
+        RU, RD = float(gen.RU), float(gen.RD)
+
+        for t in range(T):
+            m.addConstr(p[g, t] <= Pmax * u[g, t], name=f"pmax[{g},{t}]")
+            m.addConstr(p[g, t] >= Pmin * u[g, t], name=f"pmin[{g},{t}]")
+            m.addConstr(v[g, t] + w[g, t] <= 1, name=f"no_simul[{g},{t}]")
+
+        # commitment logic
+        m.addConstr(u[g, 0] - int(u_init[g]) == v[g, 0] - w[g, 0], name=f"logic_init[{g}]")
+        for t in range(1, T):
+            m.addConstr(u[g, t] - u[g, t - 1] == v[g, t] - w[g, t], name=f"logic[{g},{t}]")
+
+        # ramping (with initial dispatch)
+        m.addConstr(p[g, 0] - float(p_init[g]) <= RU, name=f"ramp_up_init[{g}]")
+        m.addConstr(float(p_init[g]) - p[g, 0] <= RD, name=f"ramp_dn_init[{g}]")
+        for t in range(1, T):
+            m.addConstr(p[g, t] - p[g, t - 1] <= RU, name=f"ramp_up[{g},{t}]")
+            m.addConstr(p[g, t - 1] - p[g, t] <= RD, name=f"ramp_dn[{g},{t}]")
+
+        # carryover min down / min up
+        if int(u_init[g]) == 0 and int(gen.DT) > 0:
+            remaining_off = max(0, int(gen.DT) - int(off_time_init[g]))
+            for t in range(min(T, remaining_off)):
+                m.addConstr(u[g, t] == 0, name=f"carry_min_dn[{g},{t}]")
+
+        if int(u_init[g]) == 1 and int(gen.UT) > 0:
+            remaining_on = max(0, int(gen.UT) - int(on_time_init[g]))
+            for t in range(min(T, remaining_on)):
+                m.addConstr(u[g, t] == 1, name=f"carry_min_up[{g},{t}]")
+
+        # standard min up/down (only if UT/DT > 1)
+        if int(gen.UT) > 1:
+            UT = int(gen.UT)
+            for t0 in range(0, T - UT + 1):
+                m.addConstr(gp.quicksum(u[g, k] for k in range(t0, t0 + UT)) >= UT * v[g, t0],
+                            name=f"min_up[{g},{t0}]")
+
+        if int(gen.DT) > 1:
+            DT = int(gen.DT)
+            for t0 in range(0, T - DT + 1):
+                m.addConstr(gp.quicksum(1 - u[g, k] for k in range(t0, t0 + DT)) >= DT * w[g, t0],
+                            name=f"min_dn[{g},{t0}]")
+
+    # -----------------------------
+    # Renewables: curtailment bounds
+    # -----------------------------
+    for r, ren in enumerate(data.rens):
+        for t in range(T):
+            m.addConstr(curt[r, t] <= float(ren.avail[t]), name=f"curt_ub[{r},{t}]")
+
+    # -----------------------------
+    # Shifting bounds
+    # -----------------------------
+    for b in range(nB):
+        for t in range(T):
+            m.addConstr(splus[b, t] <= float(data.Splus_max[b, t]), name=f"splus_ub[{b},{t}]")
+            m.addConstr(sminus[b, t] <= float(data.Sminus_max[b, t]), name=f"sminus_ub[{b},{t}]")
+
+    # -----------------------------
+    # Window neutrality
+    # -----------------------------
+    W = min(int(window_size), T)
+    if per_bus_neutrality:
+        for b in range(nB):
+            for t0 in range(0, T - W + 1):
+                m.addConstr(
+                    gp.quicksum(splus[b, t] - sminus[b, t] for t in range(t0, t0 + W)) == 0,
+                    name=f"neutral_bus[{b},{t0}]"
+                )
+    else:
+        for t0 in range(0, T - W + 1):
+            m.addConstr(
+                gp.quicksum(splus[b, t] - sminus[b, t] for b in range(nB) for t in range(t0, t0 + W)) == 0,
+                name=f"neutral_sys[{t0}]"
+            )
+
+    # -----------------------------
+    # DC flow + limits (RHS-mutable via fmax_override)
+    # -----------------------------
+    for ell, line in enumerate(data.lines):
+        fr, to = int(line.fr), int(line.to)
+        bb = float(line.b)
+
+        # NEW: either constant original or overridden (float or gurobi expr)
+        fmax_expr: FmaxType = (fmax_override[ell] if fmax_override is not None else float(line.fmax))
+
+        for t in range(T):
+            m.addConstr(f[ell, t] == bb * (theta[fr, t] - theta[to, t]), name=f"dcflow[{ell},{t}]")
+            m.addConstr(f[ell, t] <=  fmax_expr,  name=f"fmax[{ell},{t}]")
+            m.addConstr(f[ell, t] >= -fmax_expr,  name=f"fmin[{ell},{t}]")
+
+    # slack bus reference angle
+    for t in range(T):
+        m.addConstr(theta[int(data.slack_bus), t] == 0.0, name=f"slack[{t}]")
+
+    # -----------------------------
+    # Nodal balance
+    # -----------------------------
+    gens_at_bus = [[] for _ in range(nB)]
+    rens_at_bus = [[] for _ in range(nB)]
+    in_lines = [[] for _ in range(nB)]
+    out_lines = [[] for _ in range(nB)]
+
+    for g, gen in enumerate(data.gens):
+        gens_at_bus[int(gen.bus)].append(g)
+    for r, ren in enumerate(data.rens):
+        rens_at_bus[int(ren.bus)].append(r)
+    for ell, line in enumerate(data.lines):
+        out_lines[int(line.fr)].append(ell)
+        in_lines[int(line.to)].append(ell)
+
+    for b in range(nB):
+        for t in range(T):
+            gen_inj = gp.quicksum(p[g, t] for g in gens_at_bus[b])
+
+            ren_inj = gp.LinExpr()
+            for r in rens_at_bus[b]:
+                ren_inj += float(data.rens[r].avail[t]) - curt[r, t]
+
+            net_load = float(data.demand[b, t]) + splus[b, t] - sminus[b, t]
+
+            flow_in = gp.quicksum(f[ell, t] for ell in in_lines[b])
+            flow_out = gp.quicksum(f[ell, t] for ell in out_lines[b])
+
+            m.addConstr(gen_inj + ren_inj - net_load + flow_in - flow_out == 0, name=f"balance[{b},{t}]")
+
+    return m, var
+
+
+# ============================================================
+# 7b) Solve wrapper (SP) with RHS-mutable line limits
+# ============================================================
+
+def solve_uc_with_cost_4b(
+    data: NetworkUCData,
+    idx: IndexMap,
+    cvec: np.ndarray,
+    window_size: int,
+    per_bus_neutrality: bool,
+    u_init: np.ndarray,
+    p_init: np.ndarray,
+    on_time_init: np.ndarray,
+    off_time_init: np.ndarray,
+    extra_constr_fn=None,
+    output_flag: int = 0,
+    time_limit: Optional[float] = None,
+    fmax_override: Optional[Sequence[FmaxType]] = None,  # NEW
+):
+    """
+    Same as solve_uc_with_cost(...), but uses build_network_uc_model_4b and accepts fmax_override.
+    Returns (m, sol, z); if not optimal returns (m, None, None).
+    """
+    m, var = build_network_uc_model_4b(
+        data=data,
+        window_size=window_size,
+        per_bus_neutrality=per_bus_neutrality,
+        u_init=u_init,
+        p_init=p_init,
+        on_time_init=on_time_init,
+        off_time_init=off_time_init,
+        output_flag=output_flag,
+        fmax_override=fmax_override,
+    )
+
+    if extra_constr_fn is not None:
+        extra_constr_fn(m, var)
+
+    set_objective_from_cvec(m, var, idx, cvec)
+
+    if time_limit is not None:
+        m.Params.TimeLimit = float(time_limit)
+
+    m.optimize()
+
+    if m.Status != GRB.OPTIMAL:
+        return m, None, None
+
+    sol, z = extract_sol_and_z(m, var, idx)
+    return m, sol, z
+
+def make_curtailment_foil_4b(data: NetworkUCData, alpha: float, C_factual: float):
+    rhs = (1.0 - float(alpha)) * float(C_factual)
+    nR = len(data.rens); T = int(data.T)
+
+    def extra_constr_fn(m, var):
+        m.addConstr(
+            gp.quicksum(var["curt"][r, t] for r in range(nR) for t in range(T)) <= rhs,
+            name="foil_curtailment"
+        )
+    return extra_constr_fn
+
+
+def make_emissions_foil_4b(data: NetworkUCData, alpha: float, E_factual: float):
+    rhs = (1.0 - float(alpha)) * float(E_factual)
+    nG = len(data.gens); T = int(data.T)
+    e = np.array([float(g.emission_rate) for g in data.gens], dtype=float)
+
+    def extra_constr_fn(m, var):
+        m.addConstr(
+            gp.quicksum(e[g] * var["p"][g, t] for g in range(nG) for t in range(T)) <= rhs,
+            name="foil_emissions"
+        )
+    return extra_constr_fn

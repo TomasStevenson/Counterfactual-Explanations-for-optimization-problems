@@ -1,6 +1,8 @@
-numpy
-matplotlib
+ # Core dependencies with safe upper bounds
+numpy>=1.24,<2
+pandas>=1.5,<2
+matplotlib>=3.7,<4
+seaborn>=0.12,<1
+
+# Gurobi Python API: install via Gurobi installer or pin exact version here
 gurobipy
-pandas
-matplotlib
-seaborn

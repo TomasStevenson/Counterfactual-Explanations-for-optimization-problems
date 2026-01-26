@@ -611,7 +611,7 @@ def run_B3_ncxplain_shift_prices(
         )
 
         gap = float(dTx_foil - dTx_opt)
-        stop_tol = float(tol_abs + tol_rel * max(1.0, abs(dTx_opt)))
+        stop_tol = float(tol_abs + tol_rel )#* max(1.0, abs(dTx_opt)))
 
         if gap < best["gap"]:
             best.update({
@@ -1123,7 +1123,7 @@ def run_E3_ncxplain_shift_and_curt_prices_emissions(
         )
 
         gap = float(dTx_foil - dTx_opt)
-        stop_tol = float(tol_abs + tol_rel * max(1.0, abs(dTx_opt)))
+        stop_tol = float(tol_abs + tol_rel) # * max(1.0, abs(dTx_opt)))
 
         if gap < best["gap"]:
             best.update({
@@ -1144,7 +1144,25 @@ def run_E3_ncxplain_shift_and_curt_prices_emissions(
                 f"MP_obj={mp_out.get('mp_obj', None)} | bounds_used={mp_out.get('bounds_used', None)}"
             )
 
-        if gap <= stop_tol:
+
+
+        # ---- foil satisfaction check on induced optimum ----
+        foil_ok = True
+        if emissions_mode == "total":
+            foil_ok = (E_opt <= E_bar + 1e-6)
+        else:
+            hourly = _compute_hourly_emissions_from_sol(data, solOpt)
+            foil_ok = all(hourly[int(t)] <= E_bar_hours[int(t)] + 1e-6 for t in top_hours)
+
+        if gap <= stop_tol and not foil_ok:
+            if verbose:
+                if emissions_mode == "total":
+                    print(f"[E3 it={it:02d}] gap small but foil violated: E_opt={E_opt:.6f} > E_bar={E_bar:.6f}. Continuing.")
+                else:
+                    print(f"[E3 it={it:02d}] gap small but foil violated (top-k). Continuing.")
+
+
+        if gap <= stop_tol and foil_ok:
             out = {
                 "status": "OPTIMAL",
                 "iters": it,
