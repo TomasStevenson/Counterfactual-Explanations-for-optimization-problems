@@ -215,6 +215,14 @@ def build_network_uc_model(
     m = gp.Model("network_uc")
     m.Params.OutputFlag = int(output_flag)
 
+    # IMPORTANT: B&S needs names for getConstrByName(...)
+    # If IgnoreNames=1 anywhere, constraint-name lookup will fail.
+    try:
+        m.Params.IgnoreNames = 0
+    except gp.GurobiError:
+        pass
+
+    
     # Variables
     u = m.addVars(nG, T, vtype=GRB.BINARY, name="u")
     v = m.addVars(nG, T, vtype=GRB.BINARY, name="v")
