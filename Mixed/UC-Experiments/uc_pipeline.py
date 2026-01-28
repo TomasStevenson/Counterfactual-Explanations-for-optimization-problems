@@ -60,6 +60,7 @@ class NetworkUCData:
     pi_minus: np.ndarray            # (nB, T)
     carbon_price: float = 0.0
     slack_bus: int = 0
+    voll: float = 20000.0  # $/MWh (or 10000–50000)
 
 
 # ============================================================
@@ -72,6 +73,7 @@ class IndexMap:
     v: np.ndarray
     w: np.ndarray
     p: np.ndarray
+    shed: np.ndarray      # NEW
     curt: np.ndarray
     splus: np.ndarray
     sminus: np.ndarray
@@ -79,6 +81,7 @@ class IndexMap:
     f: np.ndarray
     n_vars: int
     block_slices: Dict[str, slice]
+
 
 
 def _alloc_2d(start: int, n_ent: int, T: int, major: str) -> Tuple[np.ndarray, int]:
@@ -104,7 +107,7 @@ def build_index_map_network_uc(
 ) -> IndexMap:
     """
     Block order:
-      u, v, w, p, curt, splus, sminus, theta, f
+    u, v, w, p, shed, curt, splus, sminus, theta, f
     """
     block_slices: Dict[str, slice] = {}
     s = 0
@@ -113,7 +116,7 @@ def build_index_map_network_uc(
     v, s2 = _alloc_2d(s, nG, T, major); block_slices["v"] = slice(s, s2); s = s2
     w, s2 = _alloc_2d(s, nG, T, major); block_slices["w"] = slice(s, s2); s = s2
     p, s2 = _alloc_2d(s, nG, T, major); block_slices["p"] = slice(s, s2); s = s2
-
+    shed, s2 = _alloc_2d(s, nB, T, major); block_slices["shed"] = slice(s, s2); s = s2
     curt, s2 = _alloc_2d(s, nR, T, major); block_slices["curt"] = slice(s, s2); s = s2
 
     splus, s2 = _alloc_2d(s, nB, T, major); block_slices["splus"] = slice(s, s2); s = s2
@@ -123,12 +126,12 @@ def build_index_map_network_uc(
     f, s2 = _alloc_2d(s, nL, T, major); block_slices["f"] = slice(s, s2); s = s2
 
     return IndexMap(
-        u=u, v=v, w=w, p=p, curt=curt,
-        splus=splus, sminus=sminus,
-        theta=theta, f=f,
-        n_vars=s,
-        block_slices=block_slices
-    )
+    u=u, v=v, w=w, p=p, shed=shed, curt=curt,
+    splus=splus, sminus=sminus,
+    theta=theta, f=f,
+    n_vars=s,
+    block_slices=block_slices
+)
 
 
 # ============================================================
@@ -166,6 +169,7 @@ def build_cost_vector_network_uc(
     curt_cost: np.ndarray,         # (nR,T)
     pi_plus: np.ndarray,           # (nB,T)
     pi_minus: np.ndarray,          # (nB,T)
+    voll: float,
 ) -> np.ndarray:
     c = np.zeros(idx.n_vars, dtype=float)
 
@@ -176,6 +180,9 @@ def build_cost_vector_network_uc(
     c[idx.v] = su_cost[:, None]
     c[idx.w] = sd_cost[:, None]
 
+    # load shedding penalty
+    c[idx.shed] = float(voll)
+    
     # renewable curtailment penalty
     if idx.curt.size > 0:
         c[idx.curt] = curt_cost
@@ -229,6 +236,7 @@ def build_network_uc_model(
     w = m.addVars(nG, T, vtype=GRB.BINARY, name="w")
     p = m.addVars(nG, T, lb=0.0, vtype=GRB.CONTINUOUS, name="p")
 
+    shed = m.addVars(nB, T, lb=0.0, vtype=GRB.CONTINUOUS, name="shed")
     curt = m.addVars(nR, T, lb=0.0, vtype=GRB.CONTINUOUS, name="curt")
     splus = m.addVars(nB, T, lb=0.0, vtype=GRB.CONTINUOUS, name="splus")
     sminus = m.addVars(nB, T, lb=0.0, vtype=GRB.CONTINUOUS, name="sminus")
@@ -238,9 +246,11 @@ def build_network_uc_model(
 
     var = {
         "u": u, "v": v, "w": w, "p": p,
+        "shed": shed,                      # NEW
         "curt": curt, "splus": splus, "sminus": sminus,
         "theta": theta, "f": f,
     }
+
 
     # -----------------------------
     # Generator constraints
@@ -370,7 +380,8 @@ def build_network_uc_model(
             flow_in = gp.quicksum(f[ell, t] for ell in in_lines[b])
             flow_out = gp.quicksum(f[ell, t] for ell in out_lines[b])
 
-            m.addConstr(gen_inj + ren_inj - net_load + flow_in - flow_out == 0, name=f"balance[{b},{t}]")
+            m.addConstr( gen_inj + ren_inj + shed[b, t] - net_load + flow_in - flow_out == 0, name=f"balance[{b},{t}]")
+            m.addConstr(shed[b, t] <= float(data.demand[b, t]), name=f"shed_ub[{b},{t}]")
 
     return m, var
 
@@ -397,6 +408,7 @@ def set_objective_from_cvec(m, var, idx: IndexMap, cvec: np.ndarray):
     add_block(idx.v, var["v"], cvec[idx.v])
     add_block(idx.w, var["w"], cvec[idx.w])
     add_block(idx.p, var["p"], cvec[idx.p])
+    add_block(idx.shed, var["shed"], cvec[idx.shed])
 
     if idx.curt.size > 0:
         add_block(idx.curt, var["curt"], cvec[idx.curt])
@@ -430,7 +442,7 @@ def extract_sol_and_z(m, var, idx: IndexMap):
         "v": np.array([[var["v"][g, t].X for t in range(T)] for g in range(nG)], dtype=float),
         "w": np.array([[var["w"][g, t].X for t in range(T)] for g in range(nG)], dtype=float),
         "p": np.array([[var["p"][g, t].X for t in range(T)] for g in range(nG)], dtype=float),
-
+        "shed": np.array([[var["shed"][b, t].X for t in range(T)] for b in range(nB)], dtype=float),
         "curt": np.array([[var["curt"][r, t].X for t in range(T)] for r in range(nR)], dtype=float),
 
         "splus": np.array([[var["splus"][b, t].X for t in range(T)] for b in range(nB)], dtype=float),
@@ -445,6 +457,7 @@ def extract_sol_and_z(m, var, idx: IndexMap):
     z[idx.v] = sol["v"]
     z[idx.w] = sol["w"]
     z[idx.p] = sol["p"]
+    z[idx.shed] = sol["shed"]
     if nR > 0:
         z[idx.curt] = sol["curt"]
     z[idx.splus] = sol["splus"]
@@ -547,13 +560,19 @@ def build_network_uc_model_4b(
 
     m = gp.Model("network_uc_4b")
     m.Params.OutputFlag = int(output_flag)
+    try:
+        m.Params.IgnoreNames = 0
+    except gp.GurobiError:
+        pass
+
+
 
     # Variables
     u = m.addVars(nG, T, vtype=GRB.BINARY, name="u")
     v = m.addVars(nG, T, vtype=GRB.BINARY, name="v")
     w = m.addVars(nG, T, vtype=GRB.BINARY, name="w")
     p = m.addVars(nG, T, lb=0.0, vtype=GRB.CONTINUOUS, name="p")
-
+    shed = m.addVars(nB, T, lb=0.0, vtype=GRB.CONTINUOUS, name="shed")
     curt = m.addVars(nR, T, lb=0.0, vtype=GRB.CONTINUOUS, name="curt")
     splus = m.addVars(nB, T, lb=0.0, vtype=GRB.CONTINUOUS, name="splus")
     sminus = m.addVars(nB, T, lb=0.0, vtype=GRB.CONTINUOUS, name="sminus")
@@ -563,6 +582,7 @@ def build_network_uc_model_4b(
 
     var = {
         "u": u, "v": v, "w": w, "p": p,
+        "shed": shed,                   # NEW
         "curt": curt, "splus": splus, "sminus": sminus,
         "theta": theta, "f": f,
     }
@@ -696,7 +716,9 @@ def build_network_uc_model_4b(
             flow_in = gp.quicksum(f[ell, t] for ell in in_lines[b])
             flow_out = gp.quicksum(f[ell, t] for ell in out_lines[b])
 
-            m.addConstr(gen_inj + ren_inj - net_load + flow_in - flow_out == 0, name=f"balance[{b},{t}]")
+            m.addConstr(gen_inj + ren_inj + shed[b, t] - net_load + flow_in - flow_out == 0, name=f"balance[{b},{t}]")
+            m.addConstr(shed[b, t] <= float(data.demand[b, t]), name=f"shed_ub[{b},{t}]")
+ 
 
     return m, var
 

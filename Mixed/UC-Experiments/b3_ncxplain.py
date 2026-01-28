@@ -1,3 +1,4 @@
+#b3_ncxplain.py
 import importlib, sys
 import numpy as np
 import gurobipy as gp
@@ -10,9 +11,6 @@ from uc_pipeline import (
     total_curtailment,
     )
 
-# b3_ncxplain.py
-
-import numpy as np
 
 def _compute_dTx(
     *,
@@ -44,6 +42,8 @@ def _compute_dTx(
     return float(val)
 
 
+
+
 def _fingerprint_solution_uc(sol: dict, decimals_cont: int = 3) -> tuple:
     """
     Create a hashable fingerprint for a UC solution to detect repeats/cycles.
@@ -55,15 +55,55 @@ def _fingerprint_solution_uc(sol: dict, decimals_cont: int = 3) -> tuple:
     v = np.rint(sol["v"]).astype(int).flatten()
     w = np.rint(sol["w"]).astype(int).flatten()
 
+    shed  = np.round(sol["shed"].astype(float), decimals_cont).flatten()
     curt  = np.round(sol["curt"].astype(float), decimals_cont).flatten()
     splus = np.round(sol["splus"].astype(float), decimals_cont).flatten()
     sminus= np.round(sol["sminus"].astype(float), decimals_cont).flatten()
 
-    # Include objective too (rounded) as extra safety
-    obj = float(sol["obj"])
-    obj_r = round(obj, 4)
+    obj_r = round(float(sol["obj"]), 4)
 
-    return (tuple(u), tuple(v), tuple(w), tuple(curt), tuple(splus), tuple(sminus), obj_r)
+    return (tuple(u), tuple(v), tuple(w), tuple(shed), tuple(curt), tuple(splus), tuple(sminus), obj_r)
+
+
+
+def foil_force_unit_commitment(g: int, t: int, on: bool = True):
+    """Forces commitment u[g,t] = 1 (on) or 0 (off). g,t 0-based."""
+    val = 1 if on else 0
+
+    def _foil(m, var):
+        u = var["u"]
+        m.addConstr(u[g, t] == val, name=f"foil_u[{g},{t}]")
+    return _foil
+
+
+def foil_curtailment_cap(alpha: float, sol_factual: dict):
+    """
+    Creates foil: total curtailment <= alpha * total_curtailment(sol_factual).
+    alpha in (0,1] typically; if alpha=1, same curtailment as factual.
+    """
+    C_factual = float(total_curtailment(sol_factual))
+    C_bar = float(alpha * C_factual)
+    eps_foil = 1e-4
+
+    def _foil(m, var):
+        curt = var["curt"]  # curt[r,t]
+        # infer nR,T from keys
+        nR = max(r for (r, _) in curt.keys()) + 1
+        T  = max(t for (_, t) in curt.keys()) + 1
+        expr = gp.quicksum(curt[r, t] for r in range(nR) for t in range(T))
+        m.addConstr(expr <= C_bar + eps_foil, name="foil_curtailment_cap")
+    return _foil
+
+
+def compose_foils(*foils):
+    """Return a foil function that applies all non-None foils."""
+    foils = [f for f in foils if f is not None]
+
+    def _foil(m, var):
+        for f in foils:
+            f(m, var)
+    return _foil
+
 
 
 def _build_and_solve_b3_mp(
@@ -373,6 +413,7 @@ def run_B3_ncxplain_shift_prices(
     window_size: int,
     per_bus_neutrality: bool,
     alpha: float,
+    foil_fn=None,
     price_lb: float = 0.0,
     price_ub: float = 100.0,
     curt_lb: float = 0.0,          # <<< NEW: bounds for curtailment penalty
@@ -429,13 +470,14 @@ def run_B3_ncxplain_shift_prices(
         idx=idx,
         fuel_cost=fuel_cost_vec,
         emission_rate=emission_rate_vec,
-        carbon_price=data.carbon_price,
+        carbon_price=float(getattr(data, "carbon_price", 0.0)),
         no_load_cost=no_load_cost_vec,
         su_cost=su_cost_vec,
         sd_cost=sd_cost_vec,
         curt_cost=curt_cost_mat,
         pi_plus=data.pi_plus,
         pi_minus=data.pi_minus,
+        voll=float(getattr(data, "voll", 20000.0)),
     )
 
     # --------------------------
@@ -455,27 +497,26 @@ def run_B3_ncxplain_shift_prices(
     C_bar     = float(alpha * C_factual)
 
     # --------------------------
-    # 3) foil SP (curt <= C_bar)
+    # 3) foil SP
+    #    default foil = curtailment cap (as before)
+    #    plus optional user foil (e.g., force gen ON/OFF)
     # --------------------------
-    def foil_constraint(m, var):
-        curt = var["curt"]
-        expr = gp.quicksum(curt[r, t] for r in range(nR) for t in range(T))
-        eps_foil = 1e-4
-        m.addConstr(expr <= C_bar + eps_foil, name="foil_curtailment_cap")
+    foil_base = foil_curtailment_cap(alpha=alpha, sol_factual=solF)
+    foil_all  = compose_foils(foil_base, foil_fn)
 
     mFoil, solFoil, zFoil = solve_uc_with_cost(
         data, idx, c0,
         window_size, per_bus_neutrality,
         u_init, p_init, on_time_init, off_time_init,
-        extra_constr_fn=foil_constraint,
+        extra_constr_fn=foil_all,
         output_flag=output_flag_sp
     )
     if solFoil is None:
         return {
             "status": "NO_FOIL",
-            "C_factual": C_factual,
-            "C_bar": C_bar,
-            "message": "Foil infeasible (curtailment cap too tight)."
+            "C_factual": float(total_curtailment(solF)),
+            "C_bar": float(alpha * total_curtailment(solF)),
+            "message": "Foil infeasible under (curtailment cap + extra foil)."
         }
 
     # --------------------------
@@ -518,6 +559,7 @@ def run_B3_ncxplain_shift_prices(
             tuple(np.rint(solF["u"]).astype(int).flatten()),
             tuple(np.rint(solF["v"]).astype(int).flatten()),
             tuple(np.rint(solF["w"]).astype(int).flatten()),
+            tuple(np.round(solF["shed"], 3).flatten()),
             tuple(np.round(solF["curt"], 3).flatten()),
             tuple(np.round(solF["splus"], 3).flatten()),
             tuple(np.round(solF["sminus"], 3).flatten()),
@@ -555,7 +597,7 @@ def run_B3_ncxplain_shift_prices(
             xFoil_sminus=xFoil_sminus,
             xFoil_curt=xFoil_curt,
             idx=idx,
-            price_lb=price_lb,
+            price_lb=max(0.0, float(curt_lb)),
             price_ub=price_ub,
             curt_lb=curt_lb,
             curt_ub=curt_ub,
@@ -611,7 +653,7 @@ def run_B3_ncxplain_shift_prices(
         )
 
         gap = float(dTx_foil - dTx_opt)
-        stop_tol = float(tol_abs + tol_rel )#* max(1.0, abs(dTx_opt)))
+        stop_tol = float(tol_abs + tol_rel * max(1.0, abs(dTx_opt)))#* max(1.0, abs(dTx_opt)))
 
         if gap < best["gap"]:
             best.update({
@@ -684,6 +726,7 @@ def run_B3_ncxplain_shift_prices(
             tuple(np.rint(solOpt["u"]).astype(int).flatten()),
             tuple(np.rint(solOpt["v"]).astype(int).flatten()),
             tuple(np.rint(solOpt["w"]).astype(int).flatten()),
+            tuple(np.round(solOpt["shed"], 3).flatten()),
             tuple(np.round(solOpt["curt"], 3).flatten()),
             tuple(np.round(solOpt["splus"], 3).flatten()),
             tuple(np.round(solOpt["sminus"], 3).flatten()),
@@ -772,10 +815,6 @@ def _add_topk_hour_emissions_caps(
         m.addConstr(expr_t <= cap_t + float(eps), name=f"foil_emissions_cap_t[{t}]")
 
 
-#=============================================================================
-import numpy as np
-import gurobipy as gp
-from gurobipy import GRB
 
 
 def _compute_total_emissions_from_sol(data, sol):
@@ -914,13 +953,14 @@ def run_E3_ncxplain_shift_and_curt_prices_emissions(
         idx=idx,
         fuel_cost=fuel_cost_vec,
         emission_rate=emission_rate_vec,
-        carbon_price=float(getattr(data, "carbon_price", 0.0)),  # can be 0.0
+        carbon_price=float(getattr(data, "carbon_price", 0.0)),
         no_load_cost=no_load_cost_vec,
         su_cost=su_cost_vec,
         sd_cost=sd_cost_vec,
         curt_cost=curt_cost_mat,
         pi_plus=data.pi_plus,
         pi_minus=data.pi_minus,
+        voll=float(getattr(data, "voll", 20000.0)),
     )
 
     # --------------------------
@@ -1029,10 +1069,12 @@ def run_E3_ncxplain_shift_and_curt_prices_emissions(
             tuple(np.rint(solF["u"]).astype(int).flatten()),
             tuple(np.rint(solF["v"]).astype(int).flatten()),
             tuple(np.rint(solF["w"]).astype(int).flatten()),
+            tuple(np.round(solF["shed"], 3).flatten()),
             tuple(np.round(solF["curt"], 3).flatten()),
             tuple(np.round(solF["splus"], 3).flatten()),
             tuple(np.round(solF["sminus"], 3).flatten()),
         )
+
         cuts_fp.add(zfp0)
 
     seen = {}
@@ -1123,7 +1165,7 @@ def run_E3_ncxplain_shift_and_curt_prices_emissions(
         )
 
         gap = float(dTx_foil - dTx_opt)
-        stop_tol = float(tol_abs + tol_rel) # * max(1.0, abs(dTx_opt)))
+        stop_tol = float(tol_abs + tol_rel * max(1.0, abs(dTx_opt))) # * max(1.0, abs(dTx_opt)))
 
         if gap < best["gap"]:
             best.update({
@@ -1224,6 +1266,7 @@ def run_E3_ncxplain_shift_and_curt_prices_emissions(
             tuple(np.rint(solOpt["u"]).astype(int).flatten()),
             tuple(np.rint(solOpt["v"]).astype(int).flatten()),
             tuple(np.rint(solOpt["w"]).astype(int).flatten()),
+            tuple(np.round(solOpt["shed"], 3).flatten()),
             tuple(np.round(solOpt["curt"], 3).flatten()),
             tuple(np.round(solOpt["splus"], 3).flatten()),
             tuple(np.round(solOpt["sminus"], 3).flatten()),

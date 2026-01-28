@@ -45,6 +45,8 @@ class UCBranchAndSandwichWCE_4b:
         master_time_limit: Optional[float] = 30.0,
         output_flag: int = 0,
         verbose: bool = True,
+        w: Optional[np.ndarray] = None,   # <-- NEW
+
     ):
         self.oracle = oracle
         self.data = data
@@ -56,6 +58,16 @@ class UCBranchAndSandwichWCE_4b:
         self.bL0 = np.array(b_bounds[0], dtype=float)
         self.bU0 = np.array(b_bounds[1], dtype=float)
         self.free = list(b_free_idx)
+
+        # weights for objective sum w*(b-b0) over free lines
+        if w is None:
+            self.w = np.ones_like(self.b0, dtype=float)
+        else:
+            w = np.asarray(w, dtype=float)
+            if w.shape != self.b0.shape:
+                raise ValueError(f"w must have shape {self.b0.shape}, got {w.shape}")
+            self.w = w
+
 
         self.eps_b = float(eps_b)
         self.eps_obj = float(eps_obj)
@@ -80,17 +92,26 @@ class UCBranchAndSandwichWCE_4b:
 
 
     def F(self, b: np.ndarray) -> float:
+        # reinforcement-only assumption: b >= b0 on free lines
         d = b[self.free] - self.b0[self.free]
-        return float(np.sum(np.abs(d)))
+        return float(np.sum(self.w[self.free] * d))
+
 
     def lb_box_L1(self, bL: np.ndarray, bU: np.ndarray) -> float:
-        """Lower bound of L1 distance from b0 to interval box [bL,bU] on free indices."""
+        """
+        Valid lower bound of sum_{j in free} w_j*(b_j-b0_j) over box [bL,bU].
+        For reinforcement-only (bL >= b0), this reduces to sum w_j*(bL_j-b0_j).
+        We keep the general 'distance-to-interval' form for safety.
+        """
         lb = 0.0
         for j in self.free:
+            wj = float(self.w[j])
+
             if self.b0[j] < bL[j]:
-                lb += bL[j] - self.b0[j]
+                lb += wj * (bL[j] - self.b0[j])
             elif self.b0[j] > bU[j]:
-                lb += self.b0[j] - bU[j]
+                lb += wj * (self.b0[j] - bU[j])
+
         return float(lb)
 
     def weak_ok(self, b: np.ndarray) -> Tuple[bool, Optional[float], Optional[float]]:
@@ -124,6 +145,7 @@ class UCBranchAndSandwichWCE_4b:
             foil_extra_constr_fn=self.foil_extra,
             cost_ub=self.relax_cost_ub,
             output_flag=self.output_flag,
+            w=self.w,
         )
 
         # Set master params once
@@ -154,6 +176,7 @@ class UCBranchAndSandwichWCE_4b:
             foil_extra_constr_fn=self.foil_extra,
             cost_ub=self.relax_cost_ub,
             output_flag=self.output_flag,
+             w=self.w,
         )
 
         if self.master_time_limit is not None:

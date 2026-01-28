@@ -114,6 +114,7 @@ def build_uc_relax_master_varfmax_4b(
     foil_extra_constr_fn=None,
     cost_ub: Optional[float] = None,
     output_flag: int = 0,
+    w: Optional[np.ndarray] = None,   # <-- ADD THIS
 ):
     """
     Master relaxation inside one node:
@@ -171,6 +172,15 @@ def build_uc_relax_master_varfmax_4b(
         m.addConstr(uc_cost_expr <= float(cost_ub), name="op_cost_ub")
 
 
+# weights (default 1)
+    if w is None:
+        wvec = np.ones(nL, dtype=float)
+    else:
+        wvec = np.asarray(w, dtype=float).reshape(-1)
+        if wvec.shape[0] != nL:
+            raise ValueError(f"w must have length nL={nL}, got {wvec.shape}")
+
+
     # 8) L1 objective: minimize ||b - b0||_1 over free lines
     bp = {}
     bm = {}
@@ -179,7 +189,7 @@ def build_uc_relax_master_varfmax_4b(
         bm[ell] = m.addVar(lb=0.0, name=f"bm[{ell}]")
         m.addConstr(bcap[ell] - float(b0[ell]) == bp[ell] - bm[ell], name=f"l1_link[{ell}]")
 
-    m.setObjective(gp.quicksum(bp[ell] + bm[ell] for ell in b_free_idx), GRB.MINIMIZE)
+    m.setObjective(gp.quicksum(float(wvec[ell]) * (bp[ell] + bm[ell]) for ell in b_free_idx), GRB.MINIMIZE)
 
     m.update()
     return m, var, bcap
