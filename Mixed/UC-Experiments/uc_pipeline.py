@@ -134,6 +134,30 @@ def build_index_map_network_uc(
 )
 
 
+def mutable_cost_mask_commitment_and_prod(idx, allow_prod=True, allow_commit=True):
+    """
+    Returns a boolean mask over the flattened cost vector cvec (same shape as cvec),
+    where True means that coefficient is allowed to change.
+
+    allow_prod   -> p[g,t] coefficients (marginal production price)
+    allow_commit -> u[g,t], su[g,t], sd[g,t] coefficients (commitment price parts)
+    """
+    mask = np.zeros(int(idx.nZ), dtype=bool)
+
+    if allow_prod and hasattr(idx, "p") and idx.p.size > 0:
+        mask[idx.p.ravel()] = True
+
+    if allow_commit:
+        if hasattr(idx, "u") and idx.u.size > 0:
+            mask[idx.u.ravel()] = True
+        if hasattr(idx, "su") and idx.su.size > 0:
+            mask[idx.su.ravel()] = True
+        if hasattr(idx, "sd") and idx.sd.size > 0:
+            mask[idx.sd.ravel()] = True
+
+    return mask
+
+
 # ============================================================
 # 2) Initial conditions helper
 # ============================================================

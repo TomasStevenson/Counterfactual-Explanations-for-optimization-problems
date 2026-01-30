@@ -120,9 +120,16 @@ class UCBranchAndSandwichWCE_4b:
     def weak_ok(self, b: np.ndarray) -> Tuple[bool, Optional[float], Optional[float]]:
         v_plain, _, _ = self.oracle.solve_plain(b)
         v_foil,  _, _ = self.oracle.solve_foil(b)
+
         if v_plain is None or v_foil is None:
+            if self.verbose:
+                print("  [weak_ok] FAIL: v_plain or v_foil is None")
             return False, v_plain, v_foil
-        return (v_foil <= v_plain + self.eps_weak), v_plain, v_foil
+
+        ok = (v_foil <= v_plain + self.eps_weak)
+        if (not ok) and self.verbose:
+            print(f"  [weak_ok] FAIL: vD={v_foil:.6f} > v={v_plain:.6f} + eps={self.eps_weak}")
+        return ok, v_plain, v_foil
 
     def _project_to_bounds(self, b: np.ndarray, bL: np.ndarray, bU: np.ndarray) -> np.ndarray:
         return np.minimum(np.maximum(b, bL), bU)
@@ -270,6 +277,21 @@ class UCBranchAndSandwichWCE_4b:
             if self.verbose:
                 print(f"  [INC] init@b0 F={Fb0:.4f} v={vp0:.3f} vD={vD0:.3f}")
 
+        # Also try a strong reinforcement point once (often finds the first incumbent)
+        b_max = self.b0.copy()
+        b_max[self.free] = self.bU0[self.free]
+        okm, vpm, vDm = self.weak_ok(b_max)
+        if okm:
+            Fb = self.F(b_max)
+            self.best_F = Fb
+            self.best_b = b_max.copy()
+            self.best_v_plain = vpm
+            self.best_v_foil = vDm
+            if self.verbose:
+                print(f"  [INC] init@b_max F={Fb:.4f} v={vpm:.3f} vD={vDm:.3f}")
+            
+
+
         nodes_processed = 0
 
         while heap and nodes_processed < self.max_nodes:
@@ -332,6 +354,16 @@ class UCBranchAndSandwichWCE_4b:
 
             # node center
             cand.append(0.5 * (node.bL + node.bU))
+            # aggressive candidate 1: push free lines to node upper bounds (strong reinforcement)
+            b_upper = node.bL.copy()
+            b_upper[self.free] = node.bU[self.free]
+            cand.append(b_upper)
+
+            # aggressive candidate 2 (optional but useful): push ALL lines to upper bound
+            # (keeps feasibility if your oracle expects b for all lines)
+            cand.append(node.bU.copy())
+
+
 
             # unique candidates
             uniq = []
