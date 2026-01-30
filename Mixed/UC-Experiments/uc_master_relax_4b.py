@@ -172,7 +172,7 @@ def build_uc_relax_master_varfmax_4b(
         m.addConstr(uc_cost_expr <= float(cost_ub), name="op_cost_ub")
 
 
-# weights (default 1)
+    # weights (default 1)
     if w is None:
         wvec = np.ones(nL, dtype=float)
     else:

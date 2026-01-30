@@ -42,11 +42,10 @@ class UCBranchAndSandwichWCE_4b:
         eps_weak: float = 1e-3,        # weak check tolerance
         max_nodes: int = 500,
         relax_cost_ub: Optional[float] = None,
-        master_time_limit: Optional[float] = 30.0,
+        master_time_limit: Optional[float] = None,
         output_flag: int = 0,
         verbose: bool = True,
         w: Optional[np.ndarray] = None,   # <-- NEW
-
     ):
         self.oracle = oracle
         self.data = data
@@ -58,12 +57,13 @@ class UCBranchAndSandwichWCE_4b:
         self.bL0 = np.array(b_bounds[0], dtype=float)
         self.bU0 = np.array(b_bounds[1], dtype=float)
         self.free = list(b_free_idx)
-
-        # weights for objective sum w*(b-b0) over free lines
+        # -----------------------------
+        # Weights for reinforcement cost
+        # -----------------------------
         if w is None:
             self.w = np.ones_like(self.b0, dtype=float)
         else:
-            w = np.asarray(w, dtype=float)
+            w = np.asarray(w, dtype=float).reshape(-1)
             if w.shape != self.b0.shape:
                 raise ValueError(f"w must have shape {self.b0.shape}, got {w.shape}")
             self.w = w
@@ -92,27 +92,30 @@ class UCBranchAndSandwichWCE_4b:
 
 
     def F(self, b: np.ndarray) -> float:
-        # reinforcement-only assumption: b >= b0 on free lines
+        """
+        Weighted reinforcement objective:
+        F(b) = sum_{ell in free} w_ell * (b_ell - b0_ell)
+        Assumes you enforce reinforcement-only bounds (b >= b0) on free lines.
+        """
         d = b[self.free] - self.b0[self.free]
         return float(np.sum(self.w[self.free] * d))
 
 
     def lb_box_L1(self, bL: np.ndarray, bU: np.ndarray) -> float:
         """
-        Valid lower bound of sum_{j in free} w_j*(b_j-b0_j) over box [bL,bU].
-        For reinforcement-only (bL >= b0), this reduces to sum w_j*(bL_j-b0_j).
-        We keep the general 'distance-to-interval' form for safety.
+        Valid LB on weighted distance from b0 to the box [bL,bU]:
+        LB = sum_{j in free} w_j * dist(b0_j, [bL_j, bU_j])
+        If reinforcement-only (bL >= b0), then dist reduces to (bL-b0).
         """
         lb = 0.0
         for j in self.free:
             wj = float(self.w[j])
-
             if self.b0[j] < bL[j]:
                 lb += wj * (bL[j] - self.b0[j])
             elif self.b0[j] > bU[j]:
                 lb += wj * (self.b0[j] - bU[j])
-
         return float(lb)
+
 
     def weak_ok(self, b: np.ndarray) -> Tuple[bool, Optional[float], Optional[float]]:
         v_plain, _, _ = self.oracle.solve_plain(b)
@@ -176,7 +179,7 @@ class UCBranchAndSandwichWCE_4b:
             foil_extra_constr_fn=self.foil_extra,
             cost_ub=self.relax_cost_ub,
             output_flag=self.output_flag,
-             w=self.w,
+            w=self.w,
         )
 
         if self.master_time_limit is not None:
