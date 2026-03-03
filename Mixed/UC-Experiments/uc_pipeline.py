@@ -193,11 +193,12 @@ def build_cost_vector_network_uc(
     curt_cost: np.ndarray,         # (nR,T)
     pi_plus: np.ndarray,           # (nB,T)
     pi_minus: np.ndarray,          # (nB,T)
-    voll: float,
+    voll: float = 20000.0,
 ) -> np.ndarray:
     c = np.zeros(idx.n_vars, dtype=float)
 
     c_th = fuel_cost + float(carbon_price) * emission_rate  # (nG,)
+    
 
     c[idx.p] = c_th[:, None]
     c[idx.u] = no_load_cost[:, None]
@@ -206,7 +207,7 @@ def build_cost_vector_network_uc(
 
     # load shedding penalty
     c[idx.shed] = float(voll)
-    
+
     # renewable curtailment penalty
     if idx.curt.size > 0:
         c[idx.curt] = curt_cost
