@@ -1,9 +1,813 @@
 \ Model network_uc_copy
 \ LP format - for model browsing. Use MPS format to capture full model detail.
-\ Signature: 0xb96ad2866e4770ce
+\ Signature: 0xc77c3ef33d7ac950
 Minimize
-  0 bcap[0]
+ 
 Subject To
+ splus_ub[0,6]: splus[0,6] <= 0
+ splus_ub[0,9]: splus[0,9] <= 0
+ splus_ub[0,10]: splus[0,10] <= 0
+ splus_ub[0,11]: splus[0,11] <= 0
+ splus_ub[0,12]: splus[0,12] <= 0
+ splus_ub[0,13]: splus[0,13] <= 0
+ splus_ub[0,14]: splus[0,14] <= 0
+ splus_ub[0,15]: splus[0,15] <= 0
+ splus_ub[0,16]: splus[0,16] <= 0
+ splus_ub[0,17]: splus[0,17] <= 0
+ splus_ub[0,23]: splus[0,23] <= 0
+ splus_ub[1,6]: splus[1,6] <= 0
+ splus_ub[1,9]: splus[1,9] <= 0
+ splus_ub[1,10]: splus[1,10] <= 0
+ splus_ub[1,11]: splus[1,11] <= 0
+ splus_ub[1,12]: splus[1,12] <= 0
+ splus_ub[1,13]: splus[1,13] <= 0
+ splus_ub[1,14]: splus[1,14] <= 0
+ splus_ub[1,15]: splus[1,15] <= 0
+ splus_ub[1,16]: splus[1,16] <= 0
+ splus_ub[1,17]: splus[1,17] <= 0
+ splus_ub[1,23]: splus[1,23] <= 0
+ splus_ub[2,6]: splus[2,6] <= 0
+ splus_ub[2,9]: splus[2,9] <= 0
+ splus_ub[2,10]: splus[2,10] <= 0
+ splus_ub[2,11]: splus[2,11] <= 0
+ splus_ub[2,13]: splus[2,13] <= 0
+ splus_ub[2,15]: splus[2,15] <= 0
+ splus_ub[2,16]: splus[2,16] <= 0
+ splus_ub[2,17]: splus[2,17] <= 0
+ splus_ub[2,23]: splus[2,23] <= 0
+ splus_ub[3,6]: splus[3,6] <= 0
+ splus_ub[3,9]: splus[3,9] <= 0
+ splus_ub[3,10]: splus[3,10] <= 0
+ splus_ub[3,11]: splus[3,11] <= 0
+ splus_ub[3,13]: splus[3,13] <= 0
+ splus_ub[3,15]: splus[3,15] <= 0
+ splus_ub[3,16]: splus[3,16] <= 0
+ splus_ub[3,17]: splus[3,17] <= 0
+ splus_ub[3,23]: splus[3,23] <= 0
+ splus_ub[4,6]: splus[4,6] <= 0
+ splus_ub[4,9]: splus[4,9] <= 0
+ splus_ub[4,10]: splus[4,10] <= 0
+ splus_ub[4,11]: splus[4,11] <= 0
+ splus_ub[4,13]: splus[4,13] <= 0
+ splus_ub[4,15]: splus[4,15] <= 0
+ splus_ub[4,16]: splus[4,16] <= 0
+ splus_ub[4,17]: splus[4,17] <= 0
+ splus_ub[4,23]: splus[4,23] <= 0
+ splus_ub[5,6]: splus[5,6] <= 0
+ splus_ub[5,9]: splus[5,9] <= 0
+ splus_ub[5,10]: splus[5,10] <= 0
+ splus_ub[5,11]: splus[5,11] <= 0
+ splus_ub[5,13]: splus[5,13] <= 0
+ splus_ub[5,15]: splus[5,15] <= 0
+ splus_ub[5,16]: splus[5,16] <= 0
+ splus_ub[5,17]: splus[5,17] <= 0
+ splus_ub[5,23]: splus[5,23] <= 0
+ splus_ub[6,6]: splus[6,6] <= 0
+ splus_ub[6,9]: splus[6,9] <= 0
+ splus_ub[6,10]: splus[6,10] <= 0
+ splus_ub[6,11]: splus[6,11] <= 0
+ splus_ub[6,13]: splus[6,13] <= 0
+ splus_ub[6,15]: splus[6,15] <= 0
+ splus_ub[6,16]: splus[6,16] <= 0
+ splus_ub[6,17]: splus[6,17] <= 0
+ splus_ub[6,23]: splus[6,23] <= 0
+ splus_ub[7,6]: splus[7,6] <= 0
+ splus_ub[7,9]: splus[7,9] <= 0
+ splus_ub[7,10]: splus[7,10] <= 0
+ splus_ub[7,11]: splus[7,11] <= 0
+ splus_ub[7,13]: splus[7,13] <= 0
+ splus_ub[7,15]: splus[7,15] <= 0
+ splus_ub[7,16]: splus[7,16] <= 0
+ splus_ub[7,17]: splus[7,17] <= 0
+ splus_ub[7,23]: splus[7,23] <= 0
+ splus_ub[8,6]: splus[8,6] <= 0
+ splus_ub[8,9]: splus[8,9] <= 0
+ splus_ub[8,10]: splus[8,10] <= 0
+ splus_ub[8,11]: splus[8,11] <= 0
+ splus_ub[8,13]: splus[8,13] <= 0
+ splus_ub[8,15]: splus[8,15] <= 0
+ splus_ub[8,16]: splus[8,16] <= 0
+ splus_ub[8,17]: splus[8,17] <= 0
+ splus_ub[8,23]: splus[8,23] <= 0
+ splus_ub[9,6]: splus[9,6] <= 0
+ splus_ub[9,9]: splus[9,9] <= 0
+ splus_ub[9,10]: splus[9,10] <= 0
+ splus_ub[9,11]: splus[9,11] <= 0
+ splus_ub[9,13]: splus[9,13] <= 0
+ splus_ub[9,15]: splus[9,15] <= 0
+ splus_ub[9,16]: splus[9,16] <= 0
+ splus_ub[9,17]: splus[9,17] <= 0
+ splus_ub[9,23]: splus[9,23] <= 0
+ splus_ub[10,6]: splus[10,6] <= 0
+ splus_ub[10,9]: splus[10,9] <= 0
+ splus_ub[10,10]: splus[10,10] <= 0
+ splus_ub[10,11]: splus[10,11] <= 0
+ splus_ub[10,13]: splus[10,13] <= 0
+ splus_ub[10,15]: splus[10,15] <= 0
+ splus_ub[10,16]: splus[10,16] <= 0
+ splus_ub[10,17]: splus[10,17] <= 0
+ splus_ub[10,23]: splus[10,23] <= 0
+ splus_ub[11,6]: splus[11,6] <= 0
+ splus_ub[11,9]: splus[11,9] <= 0
+ splus_ub[11,10]: splus[11,10] <= 0
+ splus_ub[11,11]: splus[11,11] <= 0
+ splus_ub[11,13]: splus[11,13] <= 0
+ splus_ub[11,15]: splus[11,15] <= 0
+ splus_ub[11,16]: splus[11,16] <= 0
+ splus_ub[11,17]: splus[11,17] <= 0
+ splus_ub[11,23]: splus[11,23] <= 0
+ splus_ub[12,6]: splus[12,6] <= 0
+ splus_ub[12,9]: splus[12,9] <= 0
+ splus_ub[12,10]: splus[12,10] <= 0
+ splus_ub[12,11]: splus[12,11] <= 0
+ splus_ub[12,13]: splus[12,13] <= 0
+ splus_ub[12,15]: splus[12,15] <= 0
+ splus_ub[12,16]: splus[12,16] <= 0
+ splus_ub[12,17]: splus[12,17] <= 0
+ splus_ub[12,23]: splus[12,23] <= 0
+ splus_ub[13,6]: splus[13,6] <= 0
+ splus_ub[13,9]: splus[13,9] <= 0
+ splus_ub[13,10]: splus[13,10] <= 0
+ splus_ub[13,11]: splus[13,11] <= 0
+ splus_ub[13,13]: splus[13,13] <= 0
+ splus_ub[13,15]: splus[13,15] <= 0
+ splus_ub[13,16]: splus[13,16] <= 0
+ splus_ub[13,17]: splus[13,17] <= 0
+ splus_ub[13,23]: splus[13,23] <= 0
+ dcflow[0,12]: - 16.90045631232043 theta[0,12]
+   + 16.90045631232043 theta[1,12] + f[0,12] = 0
+ dcflow[0,14]: - 16.90045631232043 theta[0,14]
+   + 16.90045631232043 theta[1,14] + f[0,14] = 0
+ dcflow[1,12]: - 4.483500717360115 theta[0,12]
+   + 4.483500717360115 theta[4,12] + f[1,12] = 0
+ dcflow[1,14]: - 4.483500717360115 theta[0,14]
+   + 4.483500717360115 theta[4,14] + f[1,14] = 0
+ dcflow[3,12]: - 5.671506352087114 theta[1,12]
+   + 5.671506352087114 theta[3,12] + f[3,12] = 0
+ dcflow[3,14]: - 5.671506352087114 theta[1,14]
+   + 5.671506352087114 theta[3,14] + f[3,14] = 0
+ dcflow[4,12]: - 5.751092707614447 theta[1,12]
+   + 5.751092707614447 theta[4,12] + f[4,12] = 0
+ dcflow[4,14]: - 5.751092707614447 theta[1,14]
+   + 5.751092707614447 theta[4,14] + f[4,14] = 0
+ dcflow[6,12]: - 23.74732842555212 theta[3,12]
+   + 23.74732842555212 theta[4,12] + f[6,12] = 0
+ dcflow[6,14]: - 23.74732842555212 theta[3,14]
+   + 23.74732842555212 theta[4,14] + f[6,14] = 0
+ balance[0,6]: p[0,6] + shed[0,6] - curt[3,6] - splus[0,6] + sminus[0,6]
+   - f[0,6] - f[1,6] = -16.491741831
+ balance[0,9]: p[0,9] + shed[0,9] - curt[3,9] - splus[0,9] + sminus[0,9]
+   - f[0,9] - f[1,9] = -196.30610487
+ balance[0,10]: p[0,10] + shed[0,10] - curt[3,10] - splus[0,10]
+   + sminus[0,10] - f[0,10] - f[1,10] = -246.66795687
+ balance[0,11]: p[0,11] + shed[0,11] - curt[3,11] - splus[0,11]
+   + sminus[0,11] - f[0,11] - f[1,11] = -280.43554656
+ balance[0,12]: p[0,12] + shed[0,12] - curt[3,12] - splus[0,12]
+   + sminus[0,12] - f[0,12] - f[1,12] = -300
+ balance[0,13]: p[0,13] + shed[0,13] - curt[3,13] - splus[0,13]
+   + sminus[0,13] - f[0,13] - f[1,13] = -295.20399693
+ balance[0,14]: p[0,14] + shed[0,14] - curt[3,14] - splus[0,14]
+   + sminus[0,14] - f[0,14] - f[1,14] = -274.57919745
+ balance[0,15]: p[0,15] + shed[0,15] - curt[3,15] - splus[0,15]
+   + sminus[0,15] - f[0,15] - f[1,15] = -239.71917636
+ balance[0,16]: p[0,16] + shed[0,16] - curt[3,16] - splus[0,16]
+   + sminus[0,16] - f[0,16] - f[1,16] = -188.14877439
+ balance[0,17]: p[0,17] + shed[0,17] - curt[3,17] - splus[0,17]
+   + sminus[0,17] - f[0,17] - f[1,17] = -126.27376485
+ balance[0,23]: p[0,23] + shed[0,23] - curt[3,23] - splus[0,23]
+   + sminus[0,23] - f[0,23] - f[1,23] = 0
+ balance[1,6]: p[1,6] + shed[1,6] - splus[1,6] + sminus[1,6] + f[0,6]
+   - f[2,6] - f[3,6] - f[4,6] = 12.59641733686635
+ balance[1,9]: p[1,9] + shed[1,9] - splus[1,9] + sminus[1,9] + f[0,9]
+   - f[2,9] - f[3,9] - f[4,9] = 18.70707120491909
+ balance[1,10]: p[1,10] + shed[1,10] - splus[1,10] + sminus[1,10] + f[0,10]
+   - f[2,10] - f[3,10] - f[4,10] = 20.17984264816299
+ balance[1,11]: p[1,11] + shed[1,11] - splus[1,11] + sminus[1,11] + f[0,11]
+   - f[2,11] - f[3,11] - f[4,11] = 20.74410049785329
+ balance[1,12]: p[1,12] + shed[1,12] - splus[1,12] + sminus[1,12] + f[0,12]
+   - f[2,12] - f[3,12] - f[4,12] = 21.00410385178858
+ balance[1,13]: p[1,13] + shed[1,13] - splus[1,13] + sminus[1,13] + f[0,13]
+   - f[2,13] - f[3,13] - f[4,13] = 20.90114575179431
+ balance[1,14]: p[1,14] + shed[1,14] - splus[1,14] + sminus[1,14] + f[0,14]
+   - f[2,14] - f[3,14] - f[4,14] = 20.4481527529961
+ balance[1,15]: p[1,15] + shed[1,15] - splus[1,15] + sminus[1,15] + f[0,15]
+   - f[2,15] - f[3,15] - f[4,15] = 20.2786756883288
+ balance[1,16]: p[1,16] + shed[1,16] - splus[1,16] + sminus[1,16] + f[0,16]
+   - f[2,16] - f[3,16] - f[4,16] = 20.03575253194524
+ balance[1,17]: p[1,17] + shed[1,17] - splus[1,17] + sminus[1,17] + f[0,17]
+   - f[2,17] - f[3,17] - f[4,17] = 19.32833905193327
+ balance[1,23]: p[1,23] + shed[1,23] - splus[1,23] + sminus[1,23] + f[0,23]
+   - f[2,23] - f[3,23] - f[4,23] = 16.19389110842108
+ balance[2,6]: p[2,6] + shed[2,6] - curt[0,6] - splus[2,6] + sminus[2,6]
+   + f[2,6] - f[5,6] = -45.20859484112809
+ balance[2,9]: p[2,9] + shed[2,9] - curt[0,9] - splus[2,9] + sminus[2,9]
+   + f[2,9] - f[5,9] = -29.60870801495825
+ balance[2,10]: p[2,10] + shed[2,10] - curt[0,10] - splus[2,10]
+   + sminus[2,10] + f[2,10] - f[5,10] = -38.97957687432995
+ balance[2,11]: p[2,11] + shed[2,11] - curt[0,11] - splus[2,11]
+   + sminus[2,11] + f[2,11] - f[5,11] = -50.90751341585417
+ balance[2,13]: p[2,13] + shed[2,13] - curt[0,13] - splus[2,13]
+   + sminus[2,13] + f[2,13] - f[5,13] = 16.55417008863066
+ balance[2,15]: p[2,15] + shed[2,15] - curt[0,15] - splus[2,15]
+   + sminus[2,15] + f[2,15] - f[5,15] = -64.24481370286018
+ balance[2,16]: p[2,16] + shed[2,16] - curt[0,16] - splus[2,16]
+   + sminus[2,16] + f[2,16] - f[5,16] = -60.89173811851504
+ balance[2,17]: p[2,17] + shed[2,17] - curt[0,17] - splus[2,17]
+   + sminus[2,17] + f[2,17] - f[5,17] = -69.05718035088722
+ balance[2,23]: p[2,23] + shed[2,23] - curt[0,23] - splus[2,23]
+   + sminus[2,23] + f[2,23] - f[5,23] = -73.22654598294224
+ balance[3,6]: shed[3,6] - curt[1,6] - splus[3,6] + sminus[3,6] + f[3,6]
+   + f[5,6] - f[6,6] - f[7,6] - f[8,6] = -44.55195800417611
+ balance[3,9]: shed[3,9] - curt[1,9] - splus[3,9] + sminus[3,9] + f[3,9]
+   + f[5,9] - f[6,9] - f[7,9] - f[8,9] = -45.80330329453022
+ balance[3,10]: shed[3,10] - curt[1,10] - splus[3,10] + sminus[3,10]
+   + f[3,10] + f[5,10] - f[6,10] - f[7,10] - f[8,10] = -47.97031819954494
+ balance[3,11]: shed[3,11] - curt[1,11] - splus[3,11] + sminus[3,11]
+   + f[3,11] + f[5,11] - f[6,11] - f[7,11] - f[8,11] = -50.40474051222803
+ balance[3,13]: shed[3,13] - curt[1,13] - splus[3,13] + sminus[3,13]
+   + f[3,13] + f[5,13] - f[6,13] - f[7,13] - f[8,13] = -1.682383892236984
+ balance[3,15]: shed[3,15] - curt[1,15] - splus[3,15] + sminus[3,15]
+   + f[3,15] + f[5,15] - f[6,15] - f[7,15] - f[8,15] = -48.51973087991845
+ balance[3,16]: shed[3,16] - curt[1,16] - splus[3,16] + sminus[3,16]
+   + f[3,16] + f[5,16] - f[6,16] - f[7,16] - f[8,16] = -45.36784765862613
+ balance[3,17]: shed[3,17] - curt[1,17] - splus[3,17] + sminus[3,17]
+   + f[3,17] + f[5,17] - f[6,17] - f[7,17] - f[8,17] = -50.38376938647907
+ balance[3,23]: shed[3,23] - curt[1,23] - splus[3,23] + sminus[3,23]
+   + f[3,23] + f[5,23] - f[6,23] - f[7,23] - f[8,23] = -52.05498153854251
+ balance[4,6]: shed[4,6] - curt[2,6] - splus[4,6] + sminus[4,6] + f[1,6]
+   + f[4,6] + f[6,6] - f[9,6] = -53.54280906632364
+ balance[4,9]: shed[4,9] - curt[2,9] - splus[4,9] + sminus[4,9] + f[1,9]
+   + f[4,9] + f[6,9] - f[9,9] = -61.40240705350104
+ balance[4,10]: shed[4,10] - curt[2,10] - splus[4,10] + sminus[4,10]
+   + f[1,10] + f[4,10] + f[6,10] - f[9,10] = -66.67485064466219
+ balance[4,11]: shed[4,11] - curt[2,11] - splus[4,11] + sminus[4,11]
+   + f[1,11] + f[4,11] + f[6,11] - f[9,11] = -71.1098142286601
+ balance[4,13]: shed[4,13] - curt[2,13] - splus[4,13] + sminus[4,13]
+   + f[1,13] + f[4,13] + f[6,13] - f[9,13] = -34.39568143817971
+ balance[4,15]: shed[4,15] - curt[2,15] - splus[4,15] + sminus[4,15]
+   + f[1,15] + f[4,15] + f[6,15] - f[9,15] = -71.87760603257445
+ balance[4,16]: shed[4,16] - curt[2,16] - splus[4,16] + sminus[4,16]
+   + f[1,16] + f[4,16] + f[6,16] - f[9,16] = -69.20290215528932
+ balance[4,17]: shed[4,17] - curt[2,17] - splus[4,17] + sminus[4,17]
+   + f[1,17] + f[4,17] + f[6,17] - f[9,17] = -72.10696329108418
+ balance[4,23]: shed[4,23] - curt[2,23] - splus[4,23] + sminus[4,23]
+   + f[1,23] + f[4,23] + f[6,23] - f[9,23] = -71.7452845951417
+ balance[5,6]: p[3,6] + shed[5,6] - splus[5,6] + sminus[5,6] + f[9,6]
+   - f[10,6] - f[11,6] - f[12,6] = 7.532841456750252
+ balance[5,9]: p[3,9] + shed[5,9] - splus[5,9] + sminus[5,9] + f[9,9]
+   - f[10,9] - f[11,9] - f[12,9] = 11.1871016764716
+ balance[5,10]: p[3,10] + shed[5,10] - splus[5,10] + sminus[5,10] + f[9,10]
+   - f[10,10] - f[11,10] - f[12,10] = 12.06784049984448
+ balance[5,11]: p[3,11] + shed[5,11] - splus[5,11] + sminus[5,11] + f[9,11]
+   - f[10,11] - f[11,11] - f[12,11] = 12.40527493130015
+ balance[5,13]: p[3,13] + shed[5,13] - splus[5,13] + sminus[5,13] + f[9,13]
+   - f[10,13] - f[11,13] - f[12,13] = 12.49919028578834
+ balance[5,15]: p[3,15] + shed[5,15] - splus[5,15] + sminus[5,15] + f[9,15]
+   - f[10,15] - f[11,15] - f[12,15] = 12.12694410068174
+ balance[5,16]: p[3,16] + shed[5,16] - splus[5,16] + sminus[5,16] + f[9,16]
+   - f[10,16] - f[11,16] - f[12,16] = 11.98167250684093
+ balance[5,17]: p[3,17] + shed[5,17] - splus[5,17] + sminus[5,17] + f[9,17]
+   - f[10,17] - f[11,17] - f[12,17] = 11.55862891858968
+ balance[5,23]: p[3,23] + shed[5,23] - splus[5,23] + sminus[5,23] + f[9,23]
+   - f[10,23] - f[11,23] - f[12,23] = 9.684183290005256
+ balance[6,6]: shed[6,6] - splus[6,6] + sminus[6,6] + f[7,6] - f[13,6]
+   - f[14,6] = 16.13585840725021
+ balance[6,9]: shed[6,9] - splus[6,9] + sminus[6,9] + f[7,9] - f[13,9]
+   - f[14,9] = 22.3180066526825
+ balance[6,10]: shed[6,10] - splus[6,10] + sminus[6,10] + f[7,10]
+   - f[13,10] - f[14,10] = 25.50784591598092
+ balance[6,11]: shed[6,11] - splus[6,11] + sminus[6,11] + f[7,11]
+   - f[13,11] - f[14,11] = 27.74996676734364
+ balance[6,13]: shed[6,13] - splus[6,13] + sminus[6,13] + f[7,13]
+   - f[13,13] - f[14,13] = 29.79047259063717
+ balance[6,15]: shed[6,15] - splus[6,15] + sminus[6,15] + f[7,15]
+   - f[13,15] - f[14,15] = 29.80133154375355
+ balance[6,16]: shed[6,16] - splus[6,16] + sminus[6,16] + f[7,16]
+   - f[13,16] - f[14,16] = 29.66324225063764
+ balance[6,17]: shed[6,17] - splus[6,17] + sminus[6,17] + f[7,17]
+   - f[13,17] - f[14,17] = 28.66390140768062
+ balance[6,23]: shed[6,23] - splus[6,23] + sminus[6,23] + f[7,23]
+   - f[13,23] - f[14,23] = 27.13277025293333
+ balance[7,6]: p[4,6] + shed[7,6] - splus[7,6] + sminus[7,6] + f[13,6]
+   = 6.332328681327662
+ balance[7,9]: p[4,9] + shed[7,9] - splus[7,9] + sminus[7,9] + f[13,9]
+   = 9.404207590665413
+ balance[7,10]: p[4,10] + shed[7,10] - splus[7,10] + sminus[7,10]
+   + f[13,10] = 10.14458261966661
+ balance[7,11]: p[4,11] + shed[7,11] - splus[7,11] + sminus[7,11]
+   + f[13,11] = 10.42823995410573
+ balance[7,13]: p[4,13] + shed[7,13] - splus[7,13] + sminus[7,13]
+   + f[13,13] = 10.50718797076811
+ balance[7,15]: p[4,15] + shed[7,15] - splus[7,15] + sminus[7,15]
+   + f[13,15] = 10.19426684956848
+ balance[7,16]: p[4,16] + shed[7,16] - splus[7,16] + sminus[7,16]
+   + f[13,16] = 10.07214726354745
+ balance[7,17]: p[4,17] + shed[7,17] - splus[7,17] + sminus[7,17]
+   + f[13,17] = 9.716524347186379
+ balance[7,23]: p[4,23] + shed[7,23] - splus[7,23] + sminus[7,23]
+   + f[13,23] = 8.140810072085324
+ balance[8,6]: p[5,6] + shed[8,6] - splus[8,6] + sminus[8,6] + f[8,6]
+   + f[14,6] - f[15,6] - f[16,6] = 21.58811084847246
+ balance[8,9]: p[5,9] + shed[8,9] - splus[8,9] + sminus[8,9] + f[8,9]
+   + f[14,9] - f[15,9] - f[16,9] = 32.18441579033576
+ balance[8,10]: p[5,10] + shed[8,10] - splus[8,10] + sminus[8,10] + f[8,10]
+   + f[14,10] - f[15,10] - f[16,10] = 33.07417960507115
+ balance[8,11]: p[5,11] + shed[8,11] - splus[8,11] + sminus[8,11] + f[8,11]
+   + f[14,11] - f[15,11] - f[16,11] = 32.51339815118248
+ balance[8,13]: p[5,13] + shed[8,13] - splus[8,13] + sminus[8,13] + f[8,13]
+   + f[14,13] - f[15,13] - f[16,13] = 31.03057578747162
+ balance[8,15]: p[5,15] + shed[8,15] - splus[8,15] + sminus[8,15] + f[8,15]
+   + f[14,15] - f[15,15] - f[16,15] = 29.24994897878545
+ balance[8,16]: p[5,16] + shed[8,16] - splus[8,16] + sminus[8,16] + f[8,16]
+   + f[14,16] - f[15,16] - f[16,16] = 28.6171441813606
+ balance[8,17]: p[5,17] + shed[8,17] - splus[8,17] + sminus[8,17] + f[8,17]
+   + f[14,17] - f[15,17] - f[16,17] = 27.73066262467916
+ balance[8,23]: p[5,23] + shed[8,23] - splus[8,23] + sminus[8,23] + f[8,23]
+   + f[14,23] - f[15,23] - f[16,23] = 25.98115318098926
+ balance[9,6]: shed[9,6] - splus[9,6] + sminus[9,6] + f[15,6] - f[17,6]
+   = 6.585319417354182
+ balance[9,9]: shed[9,9] - splus[9,9] + sminus[9,9] + f[15,9] - f[17,9]
+   = 9.817656566984674
+ balance[9,10]: shed[9,10] - splus[9,10] + sminus[9,10] + f[15,10]
+   - f[17,10] = 10.08907350416659
+ balance[9,11]: shed[9,11] - splus[9,11] + sminus[9,11] + f[15,11]
+   - f[17,11] = 9.918010597221835
+ balance[9,13]: shed[9,13] - splus[9,13] + sminus[9,13] + f[15,13]
+   - f[17,13] = 9.465684825283201
+ balance[9,15]: shed[9,15] - splus[9,15] + sminus[9,15] + f[15,15]
+   - f[17,15] = 8.922515653112111
+ balance[9,16]: shed[9,16] - splus[9,16] + sminus[9,16] + f[15,16]
+   - f[17,16] = 8.729482471601857
+ balance[9,17]: shed[9,17] - splus[9,17] + sminus[9,17] + f[15,17]
+   - f[17,17] = 8.459066766896793
+ balance[9,23]: shed[9,23] - splus[9,23] + sminus[9,23] + f[15,23]
+   - f[17,23] = 7.925389754061243
+ balance[10,6]: shed[10,6] - splus[10,6] + sminus[10,6] + f[10,6] + f[17,6]
+   = 12.25834825800402
+ balance[10,9]: shed[10,9] - splus[10,9] + sminus[10,9] + f[10,9] + f[17,9]
+   = 16.95490199951843
+ balance[10,10]: shed[10,10] - splus[10,10] + sminus[10,10] + f[10,10]
+   + f[17,10] = 19.37821035967344
+ balance[10,11]: shed[10,11] - splus[10,11] + sminus[10,11] + f[10,11]
+   + f[17,11] = 21.08154076446846
+ balance[10,13]: shed[10,13] - splus[10,13] + sminus[10,13] + f[10,13]
+   + f[17,13] = 22.63170502428734
+ balance[10,15]: shed[10,15] - splus[10,15] + sminus[10,15] + f[10,15]
+   + f[17,15] = 22.63995452832105
+ balance[10,16]: shed[10,16] - splus[10,16] + sminus[10,16] + f[10,16]
+   + f[17,16] = 22.53504863469002
+ balance[10,17]: shed[10,17] - splus[10,17] + sminus[10,17] + f[10,17]
+   + f[17,17] = 21.77585332123151
+ balance[10,23]: shed[10,23] - splus[10,23] + sminus[10,23] + f[10,23]
+   + f[17,23] = 20.61265899652556
+ balance[11,6]: shed[11,6] - splus[11,6] + sminus[11,6] + f[11,6] - f[18,6]
+   = 3.520813992521636
+ balance[11,9]: shed[11,9] - splus[11,9] + sminus[11,9] + f[11,9] - f[18,9]
+   = 4.869747126229671
+ balance[11,10]: shed[11,10] - splus[11,10] + sminus[11,10] + f[11,10]
+   - f[18,10] = 5.565764061223949
+ balance[11,11]: shed[11,11] - splus[11,11] + sminus[11,11] + f[11,11]
+   - f[18,11] = 6.054990619065793
+ balance[11,13]: shed[11,13] - splus[11,13] + sminus[11,13] + f[11,13]
+   - f[18,13] = 6.500225156525896
+ balance[11,15]: shed[11,15] - splus[11,15] + sminus[11,15] + f[11,15]
+   - f[18,15] = 6.502594559696855
+ balance[11,16]: shed[11,16] - splus[11,16] + sminus[11,16] + f[11,16]
+   - f[18,16] = 6.472463735345952
+ balance[11,17]: shed[11,17] - splus[11,17] + sminus[11,17] + f[11,17]
+   - f[18,17] = 6.254409440719734
+ balance[11,23]: shed[11,23] - splus[11,23] + sminus[11,23] + f[11,23]
+   - f[18,23] = 5.920319499053051
+ balance[12,6]: shed[12,6] - splus[12,6] + sminus[12,6] + f[12,6] + f[18,6]
+   - f[19,6] = 7.791965393285626
+ balance[12,9]: shed[12,9] - splus[12,9] + sminus[12,9] + f[12,9] + f[18,9]
+   - f[19,9] = 10.77730921378702
+ balance[12,10]: shed[12,10] - splus[12,10] + sminus[12,10] + f[12,10]
+   + f[18,10] - f[19,10] = 12.31767456172519
+ balance[12,11]: shed[12,11] - splus[12,11] + sminus[12,11] + f[12,11]
+   + f[18,11] - f[19,11] = 13.40038907498173
+ balance[12,13]: shed[12,13] - splus[12,13] + sminus[12,13] + f[12,13]
+   + f[18,13] - f[19,13] = 14.38574419886885
+ balance[12,15]: shed[12,15] - splus[12,15] + sminus[12,15] + f[12,15]
+   + f[18,15] - f[19,15] = 14.3909879599849
+ balance[12,16]: shed[12,16] - splus[12,16] + sminus[12,16] + f[12,16]
+   + f[18,16] - f[19,16] = 14.32430498806078
+ balance[12,17]: shed[12,17] - splus[12,17] + sminus[12,17] + f[12,17]
+   + f[18,17] - f[19,17] = 13.84172581142898
+ balance[12,23]: shed[12,23] - splus[12,23] + sminus[12,23] + f[12,23]
+   + f[18,23] - f[19,23] = 13.10234643233058
+ balance[13,6]: shed[13,6] - splus[13,6] + sminus[13,6] + f[16,6] + f[19,6]
+   = 9.035859799233975
+ balance[13,9]: shed[13,9] - splus[13,9] + sminus[13,9] + f[16,9] + f[19,9]
+   = 12.49777817964731
+ balance[13,10]: shed[13,10] - splus[13,10] + sminus[13,10] + f[16,10]
+   + f[19,10] = 14.28404449643065
+ balance[13,11]: shed[13,11] - splus[13,11] + sminus[13,11] + f[16,11]
+   + f[19,11] = 15.53960147731923
+ balance[13,13]: shed[13,13] - splus[13,13] + sminus[13,13] + f[16,13]
+   + f[19,13] = 16.68225680271031
+ balance[13,15]: shed[13,15] - splus[13,15] + sminus[13,15] + f[16,15]
+   + f[19,15] = 16.6883376677904
+ balance[13,16]: shed[13,16] - splus[13,16] + sminus[13,16] + f[16,16]
+   + f[19,16] = 16.61100955416429
+ balance[13,17]: shed[13,17] - splus[13,17] + sminus[13,17] + f[16,17]
+   + f[19,17] = 16.05139236363722
+ balance[13,23]: shed[13,23] - splus[13,23] + sminus[13,23] + f[16,23]
+   + f[19,23] = 15.19397987901109
+ fmax_var_ub[1,12]: f[1,12] - bcap[1] <= 0
+ fmax_var_ub[1,14]: f[1,14] - bcap[1] <= 0
+ fmax_var_ub[2,12]: f[2,12] - bcap[2] <= 0
+ fmax_var_ub[2,14]: f[2,14] - bcap[2] <= 0
+ fmax_var_lb[6,12]: - f[6,12] <= 70
+ fmax_var_lb[6,14]: - f[6,14] <= 70
+ foil_curt: curt[0,0] + curt[0,1] + curt[0,2] + curt[0,3] + curt[0,4]
+   + curt[0,5] + curt[0,6] + curt[0,7] + curt[0,8] + curt[0,9] + curt[0,10]
+   + curt[0,11] + curt[0,12] + curt[0,13] + curt[0,14] + curt[0,15]
+   + curt[0,16] + curt[0,17] + curt[0,18] + curt[0,19] + curt[0,20]
+   + curt[0,21] + curt[0,22] + curt[0,23] + curt[1,0] + curt[1,1]
+   + curt[1,2] + curt[1,3] + curt[1,4] + curt[1,5] + curt[1,6] + curt[1,7]
+   + curt[1,8] + curt[1,9] + curt[1,10] + curt[1,11] + curt[1,12]
+   + curt[1,13] + curt[1,14] + curt[1,15] + curt[1,16] + curt[1,17]
+   + curt[1,18] + curt[1,19] + curt[1,20] + curt[1,21] + curt[1,22]
+   + curt[1,23] + curt[2,0] + curt[2,1] + curt[2,2] + curt[2,3] + curt[2,4]
+   + curt[2,5] + curt[2,6] + curt[2,7] + curt[2,8] + curt[2,9] + curt[2,10]
+   + curt[2,11] + curt[2,12] + curt[2,13] + curt[2,14] + curt[2,15]
+   + curt[2,16] + curt[2,17] + curt[2,18] + curt[2,19] + curt[2,20]
+   + curt[2,21] + curt[2,22] + curt[2,23] + curt[3,0] + curt[3,1]
+   + curt[3,2] + curt[3,3] + curt[3,4] + curt[3,5] + curt[3,6] + curt[3,7]
+   + curt[3,8] + curt[3,9] + curt[3,10] + curt[3,11] + curt[3,12]
+   + curt[3,13] + curt[3,14] + curt[3,15] + curt[3,16] + curt[3,17]
+   + curt[3,18] + curt[3,19] + curt[3,20] + curt[3,21] + curt[3,22]
+   + curt[3,23] <= 1671.913510578943
 Bounds
- 60 <= bcap[0] <= 0
+ curt[0,6] free
+ curt[0,9] free
+ curt[0,10] free
+ curt[0,11] free
+ curt[0,13] free
+ curt[0,15] free
+ curt[0,16] free
+ curt[0,17] free
+ curt[0,23] free
+ curt[1,6] free
+ curt[1,9] free
+ curt[1,10] free
+ curt[1,11] free
+ curt[1,13] free
+ curt[1,15] free
+ curt[1,16] free
+ curt[1,17] free
+ curt[1,23] free
+ curt[2,6] free
+ curt[2,9] free
+ curt[2,10] free
+ curt[2,11] free
+ curt[2,13] free
+ curt[2,15] free
+ curt[2,16] free
+ curt[2,17] free
+ curt[2,23] free
+ curt[3,6] free
+ curt[3,9] free
+ curt[3,10] free
+ curt[3,11] free
+ curt[3,12] free
+ curt[3,13] free
+ curt[3,14] free
+ curt[3,15] free
+ curt[3,16] free
+ curt[3,17] free
+ curt[3,23] free
+ splus[0,6] free
+ splus[0,9] free
+ splus[0,10] free
+ splus[0,11] free
+ splus[0,12] free
+ splus[0,13] free
+ splus[0,14] free
+ splus[0,15] free
+ splus[0,16] free
+ splus[0,17] free
+ splus[0,23] free
+ splus[1,6] free
+ splus[1,9] free
+ splus[1,10] free
+ splus[1,11] free
+ splus[1,12] free
+ splus[1,13] free
+ splus[1,14] free
+ splus[1,15] free
+ splus[1,16] free
+ splus[1,17] free
+ splus[1,23] free
+ splus[2,6] free
+ splus[2,9] free
+ splus[2,10] free
+ splus[2,11] free
+ splus[2,13] free
+ splus[2,15] free
+ splus[2,16] free
+ splus[2,17] free
+ splus[2,23] free
+ splus[3,6] free
+ splus[3,9] free
+ splus[3,10] free
+ splus[3,11] free
+ splus[3,13] free
+ splus[3,15] free
+ splus[3,16] free
+ splus[3,17] free
+ splus[3,23] free
+ splus[4,6] free
+ splus[4,9] free
+ splus[4,10] free
+ splus[4,11] free
+ splus[4,13] free
+ splus[4,15] free
+ splus[4,16] free
+ splus[4,17] free
+ splus[4,23] free
+ splus[5,6] free
+ splus[5,9] free
+ splus[5,10] free
+ splus[5,11] free
+ splus[5,13] free
+ splus[5,15] free
+ splus[5,16] free
+ splus[5,17] free
+ splus[5,23] free
+ splus[6,6] free
+ splus[6,9] free
+ splus[6,10] free
+ splus[6,11] free
+ splus[6,13] free
+ splus[6,15] free
+ splus[6,16] free
+ splus[6,17] free
+ splus[6,23] free
+ splus[7,6] free
+ splus[7,9] free
+ splus[7,10] free
+ splus[7,11] free
+ splus[7,13] free
+ splus[7,15] free
+ splus[7,16] free
+ splus[7,17] free
+ splus[7,23] free
+ splus[8,6] free
+ splus[8,9] free
+ splus[8,10] free
+ splus[8,11] free
+ splus[8,13] free
+ splus[8,15] free
+ splus[8,16] free
+ splus[8,17] free
+ splus[8,23] free
+ splus[9,6] free
+ splus[9,9] free
+ splus[9,10] free
+ splus[9,11] free
+ splus[9,13] free
+ splus[9,15] free
+ splus[9,16] free
+ splus[9,17] free
+ splus[9,23] free
+ splus[10,6] free
+ splus[10,9] free
+ splus[10,10] free
+ splus[10,11] free
+ splus[10,13] free
+ splus[10,15] free
+ splus[10,16] free
+ splus[10,17] free
+ splus[10,23] free
+ splus[11,6] free
+ splus[11,9] free
+ splus[11,10] free
+ splus[11,11] free
+ splus[11,13] free
+ splus[11,15] free
+ splus[11,16] free
+ splus[11,17] free
+ splus[11,23] free
+ splus[12,6] free
+ splus[12,9] free
+ splus[12,10] free
+ splus[12,11] free
+ splus[12,13] free
+ splus[12,15] free
+ splus[12,16] free
+ splus[12,17] free
+ splus[12,23] free
+ splus[13,6] free
+ splus[13,9] free
+ splus[13,10] free
+ splus[13,11] free
+ splus[13,13] free
+ splus[13,15] free
+ splus[13,16] free
+ splus[13,17] free
+ splus[13,23] free
+ theta[0,12] free
+ theta[0,14] free
+ theta[1,12] free
+ theta[1,14] free
+ theta[3,12] free
+ theta[3,14] free
+ theta[4,12] free
+ theta[4,14] free
+ f[0,6] free
+ f[0,9] free
+ f[0,10] free
+ f[0,11] free
+ f[0,12] free
+ f[0,13] free
+ f[0,14] free
+ f[0,15] free
+ f[0,16] free
+ f[0,17] free
+ f[0,23] free
+ f[1,6] free
+ f[1,9] free
+ f[1,10] free
+ f[1,11] free
+ f[1,12] free
+ f[1,13] free
+ f[1,14] free
+ f[1,15] free
+ f[1,16] free
+ f[1,17] free
+ f[1,23] free
+ f[2,6] free
+ f[2,9] free
+ f[2,10] free
+ f[2,11] free
+ f[2,12] free
+ f[2,13] free
+ f[2,14] free
+ f[2,15] free
+ f[2,16] free
+ f[2,17] free
+ f[2,23] free
+ f[3,6] free
+ f[3,9] free
+ f[3,10] free
+ f[3,11] free
+ f[3,12] free
+ f[3,13] free
+ f[3,14] free
+ f[3,15] free
+ f[3,16] free
+ f[3,17] free
+ f[3,23] free
+ f[4,6] free
+ f[4,9] free
+ f[4,10] free
+ f[4,11] free
+ f[4,12] free
+ f[4,13] free
+ f[4,14] free
+ f[4,15] free
+ f[4,16] free
+ f[4,17] free
+ f[4,23] free
+ f[5,6] free
+ f[5,9] free
+ f[5,10] free
+ f[5,11] free
+ f[5,13] free
+ f[5,15] free
+ f[5,16] free
+ f[5,17] free
+ f[5,23] free
+ f[6,6] free
+ f[6,9] free
+ f[6,10] free
+ f[6,11] free
+ f[6,12] free
+ f[6,13] free
+ f[6,14] free
+ f[6,15] free
+ f[6,16] free
+ f[6,17] free
+ f[6,23] free
+ f[7,6] free
+ f[7,9] free
+ f[7,10] free
+ f[7,11] free
+ f[7,13] free
+ f[7,15] free
+ f[7,16] free
+ f[7,17] free
+ f[7,23] free
+ f[8,6] free
+ f[8,9] free
+ f[8,10] free
+ f[8,11] free
+ f[8,13] free
+ f[8,15] free
+ f[8,16] free
+ f[8,17] free
+ f[8,23] free
+ f[9,6] free
+ f[9,9] free
+ f[9,10] free
+ f[9,11] free
+ f[9,13] free
+ f[9,15] free
+ f[9,16] free
+ f[9,17] free
+ f[9,23] free
+ f[10,6] free
+ f[10,9] free
+ f[10,10] free
+ f[10,11] free
+ f[10,13] free
+ f[10,15] free
+ f[10,16] free
+ f[10,17] free
+ f[10,23] free
+ f[11,6] free
+ f[11,9] free
+ f[11,10] free
+ f[11,11] free
+ f[11,13] free
+ f[11,15] free
+ f[11,16] free
+ f[11,17] free
+ f[11,23] free
+ f[12,6] free
+ f[12,9] free
+ f[12,10] free
+ f[12,11] free
+ f[12,13] free
+ f[12,15] free
+ f[12,16] free
+ f[12,17] free
+ f[12,23] free
+ f[13,6] free
+ f[13,9] free
+ f[13,10] free
+ f[13,11] free
+ f[13,13] free
+ f[13,15] free
+ f[13,16] free
+ f[13,17] free
+ f[13,23] free
+ f[14,6] free
+ f[14,9] free
+ f[14,10] free
+ f[14,11] free
+ f[14,13] free
+ f[14,15] free
+ f[14,16] free
+ f[14,17] free
+ f[14,23] free
+ f[15,6] free
+ f[15,9] free
+ f[15,10] free
+ f[15,11] free
+ f[15,13] free
+ f[15,15] free
+ f[15,16] free
+ f[15,17] free
+ f[15,23] free
+ f[16,6] free
+ f[16,9] free
+ f[16,10] free
+ f[16,11] free
+ f[16,13] free
+ f[16,15] free
+ f[16,16] free
+ f[16,17] free
+ f[16,23] free
+ f[17,6] free
+ f[17,9] free
+ f[17,10] free
+ f[17,11] free
+ f[17,13] free
+ f[17,15] free
+ f[17,16] free
+ f[17,17] free
+ f[17,23] free
+ f[18,6] free
+ f[18,9] free
+ f[18,10] free
+ f[18,11] free
+ f[18,13] free
+ f[18,15] free
+ f[18,16] free
+ f[18,17] free
+ f[18,23] free
+ f[19,6] free
+ f[19,9] free
+ f[19,10] free
+ f[19,11] free
+ f[19,13] free
+ f[19,15] free
+ f[19,16] free
+ f[19,17] free
+ f[19,23] free
+ -infinity <= bcap[1] <= 67.5
+ -infinity <= bcap[2] <= 50
 End
