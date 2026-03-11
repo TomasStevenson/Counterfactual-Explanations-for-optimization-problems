@@ -126,6 +126,9 @@ class UCBranchAndSandwichWCE_4b:
         self.best_inner_ub = float("inf")
         self._node_id      = 0
 
+        # #5 — cache for inner UB evaluations (keyed on rounded b_worst)
+        self._inner_ub_cache: Dict[tuple, float] = {}
+
     # ------------------------------------------------------------------
     # Objective and box LB
     # ------------------------------------------------------------------
@@ -194,15 +197,22 @@ class UCBranchAndSandwichWCE_4b:
     def _compute_inner_ub(self, node, window_size, per_bus_neutrality,
                           u_init, p_init, on_t, off_t) -> float:
         b_worst = node.bL.copy() if self.b_worst_is_bL else node.bU.copy()
+        # #5 — cache: many sibling nodes share the same b_worst endpoint
+        key = tuple(np.round(b_worst[self.free], 4))
+        if key in self._inner_ub_cache:
+            return self._inner_ub_cache[key]
         v_plain, _, _ = self.oracle.solve_plain(b_worst)
-        return float(v_plain) if v_plain is not None else float("inf")
+        result = float(v_plain) if v_plain is not None else float("inf")
+        self._inner_ub_cache[key] = result
+        return result
 
     # ------------------------------------------------------------------
     # LP OLB: relaxed master with hard foil + sandwich cut
     # ------------------------------------------------------------------
 
     def _solve_lp_olb(self, node, window_size, per_bus_neutrality,
-                      u_init, p_init, on_t, off_t) -> Tuple[float, Optional[np.ndarray]]:
+                      u_init, p_init, on_t, off_t,
+                      warm_start_b=None) -> Tuple[float, Optional[np.ndarray]]:
 
         cost_ub = min(
             self.best_inner_ub,
@@ -223,6 +233,13 @@ class UCBranchAndSandwichWCE_4b:
         if self.master_time_limit is not None:
             m.Params.TimeLimit = float(self.master_time_limit)
         m.Params.OutputFlag = self.output_flag
+
+        # #1 — warm-start bcap from parent's b_star_lb (clipped to node box)
+        if warm_start_b is not None:
+            for ell in self.free:
+                bcap[ell].Start = float(
+                    np.clip(warm_start_b[ell], node.bL[ell], node.bU[ell]))
+
         m.optimize()
 
         if m.SolCount == 0:
@@ -250,7 +267,8 @@ class UCBranchAndSandwichWCE_4b:
     # ------------------------------------------------------------------
 
     def _solve_lagrangian_olb(self, node, window_size, per_bus_neutrality,
-                               u_init, p_init, on_t, off_t) -> float:
+                               u_init, p_init, on_t, off_t,
+                               warm_start_b=None) -> float:
         if self.foil_violation_expr_fn is None:
             return float("-inf")
 
@@ -274,8 +292,16 @@ class UCBranchAndSandwichWCE_4b:
 
         try:
             viol_expr = self.foil_violation_expr_fn(m, var, self.idx)
+            # #4 — adaptive lambda: scale with current best_F so penalty
+            # stays meaningful as the incumbent tightens over the search.
+            # Clipped to [50, 2000] to avoid numerical issues.
+            if np.isfinite(self.best_F) and self.best_F > self.eps_obj:
+                lam = float(np.clip(
+                    self.lagrange_penalty * (self.best_F / 10.0), 50.0, 2000.0))
+            else:
+                lam = self.lagrange_penalty
             m.setObjective(
-                m.getObjective() + self.lagrange_penalty * viol_expr,
+                m.getObjective() + lam * viol_expr,
                 GRB.MINIMIZE,
             )
         except Exception as e:
@@ -286,6 +312,13 @@ class UCBranchAndSandwichWCE_4b:
         if self.master_time_limit is not None:
             m.Params.TimeLimit = float(self.master_time_limit)
         m.Params.OutputFlag = self.output_flag
+
+        # #1 — warm-start bcap from parent's b_star_lb (clipped to node box)
+        if warm_start_b is not None:
+            for ell in self.free:
+                bcap[ell].Start = float(
+                    np.clip(warm_start_b[ell], node.bL[ell], node.bU[ell]))
+
         m.optimize()
 
         # Must be proven optimal — time-limit gives primal value, not a valid LB
@@ -299,16 +332,19 @@ class UCBranchAndSandwichWCE_4b:
     # ------------------------------------------------------------------
 
     def _solve_olb_relax(self, node, window_size, per_bus_neutrality,
-                         u_init, p_init, on_t, off_t) -> Tuple[float, Optional[np.ndarray]]:
+                         u_init, p_init, on_t, off_t,
+                         warm_start_b=None) -> Tuple[float, Optional[np.ndarray]]:
 
         lp_olb, b_star = self._solve_lp_olb(
-            node, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t)
+            node, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
+            warm_start_b=warm_start_b)
 
         if not np.isfinite(lp_olb):
             return float("inf"), None
 
         lag_olb = self._solve_lagrangian_olb(
-            node, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t)
+            node, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
+            warm_start_b=warm_start_b)
 
         if np.isfinite(lag_olb):
             # Safety: discard if numerically corrupt (exceeds known incumbent)
@@ -498,10 +534,26 @@ class UCBranchAndSandwichWCE_4b:
     # ------------------------------------------------------------------
 
     def _branch(self, node: BSNode4b):
-        widths = [(ell, node.bU[ell] - node.bL[ell]) for ell in self.free]
-        ell_max, w_max = max(widths, key=lambda x: x[1])
-        if w_max <= self.eps_b:
+        # #2 — score each free line by: w * width * (0.5 + deviation)
+        # where deviation = how far b_star_lb is from the box midpoint.
+        # This focuses splits on dimensions where the LP solution is
+        # "hugging" a boundary — i.e. where the relaxation is most dishonest.
+        scores = {}
+        for ell in self.free:
+            width = node.bU[ell] - node.bL[ell]
+            if width <= self.eps_b:
+                continue
+            mid = 0.5 * (node.bL[ell] + node.bU[ell])
+            if node.b_star_lb is not None:
+                deviation = abs(node.b_star_lb[ell] - mid) / max(width, 1e-9)
+            else:
+                deviation = 0.0
+            scores[ell] = float(self.w[ell]) * width * (0.5 + deviation)
+
+        if not scores:
             return None, None
+
+        ell_max = max(scores, key=scores.__getitem__)
         mid = 0.5 * (node.bL[ell_max] + node.bU[ell_max])
         bL1, bU1 = node.bL.copy(), node.bU.copy(); bU1[ell_max] = mid
         bL2, bU2 = node.bL.copy(), node.bU.copy(); bL2[ell_max] = mid
@@ -515,7 +567,8 @@ class UCBranchAndSandwichWCE_4b:
     # ------------------------------------------------------------------
 
     def _init_node(self, node, window_size, per_bus_neutrality,
-                   u_init, p_init, on_t, off_t):
+                   u_init, p_init, on_t, off_t,
+                   warm_start_b=None):
         node.inner_lb = self._compute_inner_lb(
             node, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t)
         node.inner_ub = self._compute_inner_ub(
@@ -533,7 +586,8 @@ class UCBranchAndSandwichWCE_4b:
             return
 
         olb, b_star    = self._solve_olb_relax(
-            node, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t)
+            node, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
+            warm_start_b=warm_start_b)
         node.olb       = olb
         node.b_star_lb = b_star
 
@@ -647,7 +701,8 @@ class UCBranchAndSandwichWCE_4b:
 
             for child in (n1, n2):
                 self._init_node(
-                    child, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t)
+                    child, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
+                    warm_start_b=node.b_star_lb)   # #1 — inherit parent OLB solution
                 if not np.isfinite(child.olb):
                     continue
                 child_lb = max(self.lb_box_L1(child.bL, child.bU), child.olb)
@@ -717,3 +772,10 @@ class UCBranchAndSandwichWCE_4b:
             self.best_v_foil  = vD
             if self.verbose:
                 print(f"  [INC] {label}: F={Fb:.4f} v={vp:.3f} v_D={vD:.3f}")
+        # #3 — v_plain at ANY accepted foil-feasible point is a valid inner UB:
+        # it's the UC cost at a concrete b vector, so c^T z <= v_plain always
+        # holds at that b. Using it as sandwich cut tightens all future OLBs.
+        if vp is not None and vp < self.best_inner_ub:
+            self.best_inner_ub = float(vp)
+            if self.verbose:
+                print(f"  [INNER_UB] tightened by incumbent: {vp:.4f}")

@@ -1,6 +1,6 @@
 \ Model network_uc_copy
 \ LP format - for model browsing. Use MPS format to capture full model detail.
-\ Signature: 0xc77c3ef33d7ac950
+\ Signature: 0xc3af3fdfebdcba14
 Minimize
  
 Subject To
@@ -19,9 +19,7 @@ Subject To
  splus_ub[1,9]: splus[1,9] <= 0
  splus_ub[1,10]: splus[1,10] <= 0
  splus_ub[1,11]: splus[1,11] <= 0
- splus_ub[1,12]: splus[1,12] <= 0
  splus_ub[1,13]: splus[1,13] <= 0
- splus_ub[1,14]: splus[1,14] <= 0
  splus_ub[1,15]: splus[1,15] <= 0
  splus_ub[1,16]: splus[1,16] <= 0
  splus_ub[1,17]: splus[1,17] <= 0
@@ -134,26 +132,6 @@ Subject To
  splus_ub[13,16]: splus[13,16] <= 0
  splus_ub[13,17]: splus[13,17] <= 0
  splus_ub[13,23]: splus[13,23] <= 0
- dcflow[0,12]: - 16.90045631232043 theta[0,12]
-   + 16.90045631232043 theta[1,12] + f[0,12] = 0
- dcflow[0,14]: - 16.90045631232043 theta[0,14]
-   + 16.90045631232043 theta[1,14] + f[0,14] = 0
- dcflow[1,12]: - 4.483500717360115 theta[0,12]
-   + 4.483500717360115 theta[4,12] + f[1,12] = 0
- dcflow[1,14]: - 4.483500717360115 theta[0,14]
-   + 4.483500717360115 theta[4,14] + f[1,14] = 0
- dcflow[3,12]: - 5.671506352087114 theta[1,12]
-   + 5.671506352087114 theta[3,12] + f[3,12] = 0
- dcflow[3,14]: - 5.671506352087114 theta[1,14]
-   + 5.671506352087114 theta[3,14] + f[3,14] = 0
- dcflow[4,12]: - 5.751092707614447 theta[1,12]
-   + 5.751092707614447 theta[4,12] + f[4,12] = 0
- dcflow[4,14]: - 5.751092707614447 theta[1,14]
-   + 5.751092707614447 theta[4,14] + f[4,14] = 0
- dcflow[6,12]: - 23.74732842555212 theta[3,12]
-   + 23.74732842555212 theta[4,12] + f[6,12] = 0
- dcflow[6,14]: - 23.74732842555212 theta[3,14]
-   + 23.74732842555212 theta[4,14] + f[6,14] = 0
  balance[0,6]: p[0,6] + shed[0,6] - curt[3,6] - splus[0,6] + sminus[0,6]
    - f[0,6] - f[1,6] = -16.491741831
  balance[0,9]: p[0,9] + shed[0,9] - curt[3,9] - splus[0,9] + sminus[0,9]
@@ -179,17 +157,13 @@ Subject To
  balance[1,6]: p[1,6] + shed[1,6] - splus[1,6] + sminus[1,6] + f[0,6]
    - f[2,6] - f[3,6] - f[4,6] = 12.59641733686635
  balance[1,9]: p[1,9] + shed[1,9] - splus[1,9] + sminus[1,9] + f[0,9]
-   - f[2,9] - f[3,9] - f[4,9] = 18.70707120491909
+   - f[2,9] - f[3,9] - f[4,9] = 18.70707120491908
  balance[1,10]: p[1,10] + shed[1,10] - splus[1,10] + sminus[1,10] + f[0,10]
    - f[2,10] - f[3,10] - f[4,10] = 20.17984264816299
  balance[1,11]: p[1,11] + shed[1,11] - splus[1,11] + sminus[1,11] + f[0,11]
    - f[2,11] - f[3,11] - f[4,11] = 20.74410049785329
- balance[1,12]: p[1,12] + shed[1,12] - splus[1,12] + sminus[1,12] + f[0,12]
-   - f[2,12] - f[3,12] - f[4,12] = 21.00410385178858
  balance[1,13]: p[1,13] + shed[1,13] - splus[1,13] + sminus[1,13] + f[0,13]
    - f[2,13] - f[3,13] - f[4,13] = 20.90114575179431
- balance[1,14]: p[1,14] + shed[1,14] - splus[1,14] + sminus[1,14] + f[0,14]
-   - f[2,14] - f[3,14] - f[4,14] = 20.4481527529961
  balance[1,15]: p[1,15] + shed[1,15] - splus[1,15] + sminus[1,15] + f[0,15]
    - f[2,15] - f[3,15] - f[4,15] = 20.2786756883288
  balance[1,16]: p[1,16] + shed[1,16] - splus[1,16] + sminus[1,16] + f[0,16]
@@ -201,7 +175,7 @@ Subject To
  balance[2,6]: p[2,6] + shed[2,6] - curt[0,6] - splus[2,6] + sminus[2,6]
    + f[2,6] - f[5,6] = -45.20859484112809
  balance[2,9]: p[2,9] + shed[2,9] - curt[0,9] - splus[2,9] + sminus[2,9]
-   + f[2,9] - f[5,9] = -29.60870801495825
+   + f[2,9] - f[5,9] = -29.60870801495827
  balance[2,10]: p[2,10] + shed[2,10] - curt[0,10] - splus[2,10]
    + sminus[2,10] + f[2,10] - f[5,10] = -38.97957687432995
  balance[2,11]: p[2,11] + shed[2,11] - curt[0,11] - splus[2,11]
@@ -219,7 +193,7 @@ Subject To
  balance[3,6]: shed[3,6] - curt[1,6] - splus[3,6] + sminus[3,6] + f[3,6]
    + f[5,6] - f[6,6] - f[7,6] - f[8,6] = -44.55195800417611
  balance[3,9]: shed[3,9] - curt[1,9] - splus[3,9] + sminus[3,9] + f[3,9]
-   + f[5,9] - f[6,9] - f[7,9] - f[8,9] = -45.80330329453022
+   + f[5,9] - f[6,9] - f[7,9] - f[8,9] = -45.80330329453023
  balance[3,10]: shed[3,10] - curt[1,10] - splus[3,10] + sminus[3,10]
    + f[3,10] + f[5,10] - f[6,10] - f[7,10] - f[8,10] = -47.97031819954494
  balance[3,11]: shed[3,11] - curt[1,11] - splus[3,11] + sminus[3,11]
@@ -237,7 +211,7 @@ Subject To
  balance[4,6]: shed[4,6] - curt[2,6] - splus[4,6] + sminus[4,6] + f[1,6]
    + f[4,6] + f[6,6] - f[9,6] = -53.54280906632364
  balance[4,9]: shed[4,9] - curt[2,9] - splus[4,9] + sminus[4,9] + f[1,9]
-   + f[4,9] + f[6,9] - f[9,9] = -61.40240705350104
+   + f[4,9] + f[6,9] - f[9,9] = -61.40240705350105
  balance[4,10]: shed[4,10] - curt[2,10] - splus[4,10] + sminus[4,10]
    + f[1,10] + f[4,10] + f[6,10] - f[9,10] = -66.67485064466219
  balance[4,11]: shed[4,11] - curt[2,11] - splus[4,11] + sminus[4,11]
@@ -255,7 +229,7 @@ Subject To
  balance[5,6]: p[3,6] + shed[5,6] - splus[5,6] + sminus[5,6] + f[9,6]
    - f[10,6] - f[11,6] - f[12,6] = 7.532841456750252
  balance[5,9]: p[3,9] + shed[5,9] - splus[5,9] + sminus[5,9] + f[9,9]
-   - f[10,9] - f[11,9] - f[12,9] = 11.1871016764716
+   - f[10,9] - f[11,9] - f[12,9] = 11.18710167647159
  balance[5,10]: p[3,10] + shed[5,10] - splus[5,10] + sminus[5,10] + f[9,10]
    - f[10,10] - f[11,10] - f[12,10] = 12.06784049984448
  balance[5,11]: p[3,11] + shed[5,11] - splus[5,11] + sminus[5,11] + f[9,11]
@@ -289,9 +263,9 @@ Subject To
  balance[6,23]: shed[6,23] - splus[6,23] + sminus[6,23] + f[7,23]
    - f[13,23] - f[14,23] = 27.13277025293333
  balance[7,6]: p[4,6] + shed[7,6] - splus[7,6] + sminus[7,6] + f[13,6]
-   = 6.332328681327662
+   = 6.332328681327664
  balance[7,9]: p[4,9] + shed[7,9] - splus[7,9] + sminus[7,9] + f[13,9]
-   = 9.404207590665413
+   = 9.404207590665415
  balance[7,10]: p[4,10] + shed[7,10] - splus[7,10] + sminus[7,10]
    + f[13,10] = 10.14458261966661
  balance[7,11]: p[4,11] + shed[7,11] - splus[7,11] + sminus[7,11]
@@ -299,13 +273,13 @@ Subject To
  balance[7,13]: p[4,13] + shed[7,13] - splus[7,13] + sminus[7,13]
    + f[13,13] = 10.50718797076811
  balance[7,15]: p[4,15] + shed[7,15] - splus[7,15] + sminus[7,15]
-   + f[13,15] = 10.19426684956848
+   + f[13,15] = 10.19426684956849
  balance[7,16]: p[4,16] + shed[7,16] - splus[7,16] + sminus[7,16]
-   + f[13,16] = 10.07214726354745
+   + f[13,16] = 10.07214726354746
  balance[7,17]: p[4,17] + shed[7,17] - splus[7,17] + sminus[7,17]
-   + f[13,17] = 9.716524347186379
+   + f[13,17] = 9.716524347186381
  balance[7,23]: p[4,23] + shed[7,23] - splus[7,23] + sminus[7,23]
-   + f[13,23] = 8.140810072085324
+   + f[13,23] = 8.140810072085326
  balance[8,6]: p[5,6] + shed[8,6] - splus[8,6] + sminus[8,6] + f[8,6]
    + f[14,6] - f[15,6] - f[16,6] = 21.58811084847246
  balance[8,9]: p[5,9] + shed[8,9] - splus[8,9] + sminus[8,9] + f[8,9]
@@ -327,7 +301,7 @@ Subject To
  balance[9,6]: shed[9,6] - splus[9,6] + sminus[9,6] + f[15,6] - f[17,6]
    = 6.585319417354182
  balance[9,9]: shed[9,9] - splus[9,9] + sminus[9,9] + f[15,9] - f[17,9]
-   = 9.817656566984674
+   = 9.817656566984672
  balance[9,10]: shed[9,10] - splus[9,10] + sminus[9,10] + f[15,10]
    - f[17,10] = 10.08907350416659
  balance[9,11]: shed[9,11] - splus[9,11] + sminus[9,11] + f[15,11]
@@ -363,7 +337,7 @@ Subject To
  balance[11,6]: shed[11,6] - splus[11,6] + sminus[11,6] + f[11,6] - f[18,6]
    = 3.520813992521636
  balance[11,9]: shed[11,9] - splus[11,9] + sminus[11,9] + f[11,9] - f[18,9]
-   = 4.869747126229671
+   = 4.86974712622967
  balance[11,10]: shed[11,10] - splus[11,10] + sminus[11,10] + f[11,10]
    - f[18,10] = 5.565764061223949
  balance[11,11]: shed[11,11] - splus[11,11] + sminus[11,11] + f[11,11]
@@ -414,12 +388,10 @@ Subject To
    + f[19,17] = 16.05139236363722
  balance[13,23]: shed[13,23] - splus[13,23] + sminus[13,23] + f[16,23]
    + f[19,23] = 15.19397987901109
+ fmax_var_ub[0,12]: f[0,12] - bcap[0] <= 0
+ fmax_var_ub[0,14]: f[0,14] - bcap[0] <= 0
  fmax_var_ub[1,12]: f[1,12] - bcap[1] <= 0
  fmax_var_ub[1,14]: f[1,14] - bcap[1] <= 0
- fmax_var_ub[2,12]: f[2,12] - bcap[2] <= 0
- fmax_var_ub[2,14]: f[2,14] - bcap[2] <= 0
- fmax_var_lb[6,12]: - f[6,12] <= 70
- fmax_var_lb[6,14]: - f[6,14] <= 70
  foil_curt: curt[0,0] + curt[0,1] + curt[0,2] + curt[0,3] + curt[0,4]
    + curt[0,5] + curt[0,6] + curt[0,7] + curt[0,8] + curt[0,9] + curt[0,10]
    + curt[0,11] + curt[0,12] + curt[0,13] + curt[0,14] + curt[0,15]
@@ -493,9 +465,7 @@ Bounds
  splus[1,9] free
  splus[1,10] free
  splus[1,11] free
- splus[1,12] free
  splus[1,13] free
- splus[1,14] free
  splus[1,15] free
  splus[1,16] free
  splus[1,17] free
@@ -608,14 +578,6 @@ Bounds
  splus[13,16] free
  splus[13,17] free
  splus[13,23] free
- theta[0,12] free
- theta[0,14] free
- theta[1,12] free
- theta[1,14] free
- theta[3,12] free
- theta[3,14] free
- theta[4,12] free
- theta[4,14] free
  f[0,6] free
  f[0,9] free
  f[0,10] free
@@ -642,9 +604,7 @@ Bounds
  f[2,9] free
  f[2,10] free
  f[2,11] free
- f[2,12] free
  f[2,13] free
- f[2,14] free
  f[2,15] free
  f[2,16] free
  f[2,17] free
@@ -653,9 +613,7 @@ Bounds
  f[3,9] free
  f[3,10] free
  f[3,11] free
- f[3,12] free
  f[3,13] free
- f[3,14] free
  f[3,15] free
  f[3,16] free
  f[3,17] free
@@ -664,9 +622,7 @@ Bounds
  f[4,9] free
  f[4,10] free
  f[4,11] free
- f[4,12] free
  f[4,13] free
- f[4,14] free
  f[4,15] free
  f[4,16] free
  f[4,17] free
@@ -684,9 +640,7 @@ Bounds
  f[6,9] free
  f[6,10] free
  f[6,11] free
- f[6,12] free
  f[6,13] free
- f[6,14] free
  f[6,15] free
  f[6,16] free
  f[6,17] free
@@ -808,6 +762,6 @@ Bounds
  f[19,16] free
  f[19,17] free
  f[19,23] free
- -infinity <= bcap[1] <= 67.5
- -infinity <= bcap[2] <= 50
+ -infinity <= bcap[0] <= 154.6875
+ -infinity <= bcap[1] <= 72.1875
 End
