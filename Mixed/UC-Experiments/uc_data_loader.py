@@ -41,6 +41,8 @@ def load_network_from_json(
     curt_penalty: float = 5.0,              # $/MWh curtailment cost (if not in JSON)
     voll: float = 20_000.0,                 # $/MWh value of lost load
     slack_bus: Optional[int] = None,        # overrides JSON value if given
+    demand_scaling: Optional[float] = None,  # if given, scales demand and S+/S- limits
+    ren_scaling: Optional[float] = None,     # if given, scales renewable availability and curtailment costs
 ) -> NetworkUCData:
     """
     Load a grid JSON file and return a ready-to-use NetworkUCData.
@@ -74,6 +76,7 @@ def load_network_from_json(
 
     # ── Arrays ──────────────────────────────────────────────────────────────
     demand     = np.array(d["demand"],     dtype=float)   # (nB, T)
+    demand = demand * float(demand_scaling) if demand_scaling is not None else demand   
     Splus_max  = np.array(d["Splus_max"],  dtype=float)
     Sminus_max = np.array(d["Sminus_max"], dtype=float)
     pi_plus    = np.array(d["pi_plus"],    dtype=float)
@@ -115,7 +118,11 @@ def load_network_from_json(
         else:
             curt_cost = np.array(cc, dtype=float)
         rens.append(Renewable(bus=int(r["bus"]), avail=avail, curt_cost=curt_cost))
+    if ren_scaling is not None:
+        s = float(ren_scaling)
+        rens = [Renewable(bus=r.bus, avail=r.avail * s, curt_cost=r.curt_cost) for r in rens]
 
+    
     return NetworkUCData(
         nB=nB, T=T,
         demand=demand, lines=lines, gens=gens, rens=rens,
@@ -138,6 +145,8 @@ def quick_setup(
     curt_penalty: float = 5.0,
     voll: float = 20_000.0,
     slack_bus: Optional[int] = None,
+    demand_scaling: Optional[float] = None,  # if given, scales demand and S+/S- limits
+    ren_scaling: Optional[float] = None,     # if given, scales renewable availability and curtailment costs
 ):
     """
     One-call setup that returns everything needed to run your pipeline.
@@ -165,6 +174,8 @@ def quick_setup(
         curt_penalty=curt_penalty,
         voll=voll,
         slack_bus=slack_bus,
+        demand_scaling=demand_scaling,
+        ren_scaling=ren_scaling,
     )
 
     nG = len(DATA.gens)
