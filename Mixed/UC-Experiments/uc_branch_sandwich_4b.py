@@ -1,11 +1,84 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Callable
+import json
+import pathlib
+import threading
+import time as _time
+from collections import OrderedDict
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
 import heapq
 from uc_master_relax_4b import build_uc_relax_master_varfmax_4b
+
+
+# ============================================================
+# LRU cache (bounded dict)
+# ============================================================
+
+class _LRUCache:
+    """Thread-safe bounded LRU cache."""
+    def __init__(self, maxsize: int = 1000):
+        self._maxsize = maxsize
+        self._cache: OrderedDict = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            if key not in self._cache:
+                return None
+            self._cache.move_to_end(key)
+            return self._cache[key]
+
+    def set(self, key, value):
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            self._cache[key] = value
+            if len(self._cache) > self._maxsize:
+                self._cache.popitem(last=False)
+
+    def __contains__(self, key):
+        with self._lock:
+            return key in self._cache
+
+    def __len__(self):
+        with self._lock:
+            return len(self._cache)
+
+
+# ============================================================
+# Gurobi keep-alive thread
+# ============================================================
+
+class _GurobiKeepAlive:
+    """
+    Pings Gurobi every `interval` seconds with a trivial 1-variable LP
+    to prevent WLS license token expiry during long B&S runs.
+    Runs as a daemon thread — dies automatically when the main process exits.
+    """
+    def __init__(self, interval: float = 1200.0):  # 20 min default
+        self._interval = float(interval)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        while not self._stop.wait(self._interval):
+            try:
+                m = gp.Model()
+                m.Params.OutputFlag = 0
+                x = m.addVar(lb=0.0, ub=1.0, obj=1.0)
+                m.optimize()
+                m.dispose()
+            except Exception:
+                pass  # best-effort; main thread handles real errors
 
 
 # ============================================================
@@ -87,6 +160,10 @@ class UCBranchAndSandwichWCE_4b:
         oub_grid_pts: int = 3,
         foil_violation_expr_fn: Optional[Callable] = None,
         lagrange_penalty: float = 500.0,
+        checkpoint_path: Optional[str] = None,
+        checkpoint_interval: int = 1,        # save every N nodes
+        keepalive_interval: float = 1200.0,  # seconds between pings
+        inner_ub_cache_size: int = 1000,
     ):
         self.oracle = oracle
         self.data = data
@@ -118,6 +195,13 @@ class UCBranchAndSandwichWCE_4b:
         self.foil_violation_expr_fn = foil_violation_expr_fn
         self.lagrange_penalty = float(lagrange_penalty)
 
+        # Checkpoint
+        self.checkpoint_path = pathlib.Path(checkpoint_path) if checkpoint_path else None
+        self.checkpoint_interval = int(checkpoint_interval)
+
+        # Keep-alive
+        self._keepalive = _GurobiKeepAlive(interval=keepalive_interval)
+
         # Incumbents
         self.best_F        = float("inf")
         self.best_b        = None
@@ -126,8 +210,12 @@ class UCBranchAndSandwichWCE_4b:
         self.best_inner_ub = float("inf")
         self._node_id      = 0
 
-        # #5 — cache for inner UB evaluations (keyed on rounded b_worst)
-        self._inner_ub_cache: Dict[tuple, float] = {}
+        # Bounded LRU cache for inner UB evaluations
+        self._inner_ub_cache = _LRUCache(maxsize=inner_ub_cache_size)
+
+        # Load checkpoint if it exists
+        if self.checkpoint_path and self.checkpoint_path.exists():
+            self._load_checkpoint()
 
     # ------------------------------------------------------------------
     # Objective and box LB
@@ -185,10 +273,14 @@ class UCBranchAndSandwichWCE_4b:
         if self.master_time_limit is not None:
             m.Params.TimeLimit = float(self.master_time_limit)
         m.Params.OutputFlag = self.output_flag
-        m.optimize()
+        from uc_pipeline import _optimize_with_retry
+        _optimize_with_retry(m)
         if m.SolCount == 0 or m.Status not in (GRB.OPTIMAL, GRB.TIME_LIMIT):
+            m.dispose()
             return float("inf")
-        return float(m.ObjVal)
+        result = float(m.ObjVal)
+        m.dispose()
+        return result
 
     # ------------------------------------------------------------------
     # Inner UB: integer UC at worst-case b endpoint
@@ -197,13 +289,13 @@ class UCBranchAndSandwichWCE_4b:
     def _compute_inner_ub(self, node, window_size, per_bus_neutrality,
                           u_init, p_init, on_t, off_t) -> float:
         b_worst = node.bL.copy() if self.b_worst_is_bL else node.bU.copy()
-        # #5 — cache: many sibling nodes share the same b_worst endpoint
         key = tuple(np.round(b_worst[self.free], 4))
-        if key in self._inner_ub_cache:
-            return self._inner_ub_cache[key]
+        cached = self._inner_ub_cache.get(key)
+        if cached is not None:
+            return cached
         v_plain, _, _ = self.oracle.solve_plain(b_worst)
         result = float(v_plain) if v_plain is not None else float("inf")
-        self._inner_ub_cache[key] = result
+        self._inner_ub_cache.set(key, result)
         return result
 
     # ------------------------------------------------------------------
@@ -240,7 +332,8 @@ class UCBranchAndSandwichWCE_4b:
                 bcap[ell].Start = float(
                     np.clip(warm_start_b[ell], node.bL[ell], node.bU[ell]))
 
-        m.optimize()
+        from uc_pipeline import _optimize_with_retry
+        _optimize_with_retry(m)
 
         if m.SolCount == 0:
             if m.Status == GRB.INFEASIBLE:
@@ -250,14 +343,18 @@ class UCBranchAndSandwichWCE_4b:
                     m.computeIIS(); m.write("master_relax.ilp")
                 except gp.GurobiError:
                     pass
+            m.dispose()
             return float("inf"), None
         if m.Status not in (GRB.OPTIMAL, GRB.TIME_LIMIT):
+            m.dispose()
             return float("inf"), None
 
         b_star = self.b0.copy()
         for ell in self.free:
             b_star[ell] = float(bcap[ell].X)
-        return float(m.ObjVal), b_star
+        result = float(m.ObjVal), b_star
+        m.dispose()
+        return result
 
     # ------------------------------------------------------------------
     # Lagrangian OLB: relaxed master WITHOUT hard foil, penalty term added.
@@ -319,13 +416,17 @@ class UCBranchAndSandwichWCE_4b:
                 bcap[ell].Start = float(
                     np.clip(warm_start_b[ell], node.bL[ell], node.bU[ell]))
 
-        m.optimize()
+        from uc_pipeline import _optimize_with_retry
+        _optimize_with_retry(m)
 
         # Must be proven optimal — time-limit gives primal value, not a valid LB
         if m.Status != GRB.OPTIMAL or m.SolCount == 0:
+            m.dispose()
             return float("-inf")
 
-        return float(m.ObjVal)
+        result = float(m.ObjVal)
+        m.dispose()
+        return result
 
     # ------------------------------------------------------------------
     # Combined OLB: max(LP, Lagrangian) with safety clip
@@ -450,15 +551,15 @@ class UCBranchAndSandwichWCE_4b:
             GRB.MINIMIZE,
         )
 
+        from uc_pipeline import _optimize_with_retry
+
         m.Params.TimeLimit  = float(time_limit)
         m.Params.OutputFlag = self.output_flag
         m.Params.MIPGap     = 0.005   # stop at 0.5% internal MIP gap
 
-        m.optimize()
+        _optimize_with_retry(m)
 
         if m.SolCount == 0:
-            # No feasible integer solution found within time limit.
-            # ObjBound is still valid but may be -inf or very loose.
             if self.verbose:
                 print(f"  [MIP_LB] No feasible solution found — "
                       f"ObjBound={m.ObjBound:.4f} (may be loose)")
@@ -466,16 +567,12 @@ class UCBranchAndSandwichWCE_4b:
         else:
             mip_lb = float(m.ObjBound)
 
-            # Bonus: if MIP found a better incumbent, try to update it.
-            # Clear oracle.cache_foil first — a stale cache from a previous
-            # foil type (e.g. emissions foil called before curtailment foil)
-            # can make weak_ok return False for a genuinely valid solution.
             mip_F = float(m.ObjVal)
             if mip_F < self.best_F - self.eps_obj:
                 b_mip = self.b0.copy()
                 for ell in self.free:
                     b_mip[ell] = float(bcap[ell].X)
-                self.oracle.cache_foil.clear()   # <-- evict stale entries
+                self.oracle.cache_foil.clear()
                 ok, vp, vD = self.weak_ok(b_mip)
                 if ok:
                     self._update_incumbent(b_mip, mip_F, vp, vD, "MIP_LB")
@@ -498,6 +595,7 @@ class UCBranchAndSandwichWCE_4b:
         if self.best_b is not None:
             mip_lb = min(mip_lb, self.best_F)
 
+        m.dispose()
         return mip_lb
 
     # ------------------------------------------------------------------
@@ -592,6 +690,47 @@ class UCBranchAndSandwichWCE_4b:
         node.b_star_lb = b_star
 
     # ------------------------------------------------------------------
+    # Checkpoint save / load
+    # ------------------------------------------------------------------
+
+    def _save_checkpoint(self, nodes_processed: int, global_LB: float) -> None:
+        if self.checkpoint_path is None:
+            return
+        state = {
+            "best_F":        self.best_F,
+            "best_b":        self.best_b.tolist() if self.best_b is not None else None,
+            "best_v_plain":  self.best_v_plain,
+            "best_v_foil":   self.best_v_foil,
+            "best_inner_ub": self.best_inner_ub,
+            "nodes_processed": nodes_processed,
+            "global_LB":     global_LB,
+        }
+        tmp = self.checkpoint_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        tmp.replace(self.checkpoint_path)  # atomic on POSIX
+        if self.verbose:
+            print(f"  [CKPT] saved → {self.checkpoint_path}  "
+                  f"nodes={nodes_processed}  bestF={self.best_F:.4f}  "
+                  f"gLB={global_LB:.4f}")
+
+    def _load_checkpoint(self) -> None:
+        try:
+            state = json.loads(self.checkpoint_path.read_text())
+            self.best_F        = float(state["best_F"])
+            self.best_b        = np.array(state["best_b"], dtype=float) if state["best_b"] is not None else None
+            self.best_v_plain  = state.get("best_v_plain")
+            self.best_v_foil   = state.get("best_v_foil")
+            self.best_inner_ub = float(state.get("best_inner_ub", float("inf")))
+            if self.verbose:
+                print(f"[CKPT] Resumed from {self.checkpoint_path}  "
+                      f"bestF={self.best_F:.4f}  "
+                      f"nodes_prev={state.get('nodes_processed', '?')}  "
+                      f"gLB={state.get('global_LB', float('nan')):.4f}")
+        except Exception as e:
+            if self.verbose:
+                print(f"[CKPT] Could not load checkpoint ({e}) — starting fresh")
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
@@ -608,6 +747,9 @@ class UCBranchAndSandwichWCE_4b:
         heap: list = []
         tie = 0
         open_node_lbs: Dict[int, float] = {}
+
+        # Start keep-alive thread
+        self._keepalive.start()
 
         # Warm-start incumbents
         ok0, vp0, vD0 = self.weak_ok(self.b0)
@@ -629,91 +771,102 @@ class UCBranchAndSandwichWCE_4b:
         nodes_processed = 0
         certified = False
 
-        while heap and nodes_processed < self.max_nodes:
+        try:
+            while heap and nodes_processed < self.max_nodes:
 
-            # Global LB: min over open nodes, clipped to never exceed best_F
-            global_LB = min(open_node_lbs.values()) if open_node_lbs else float("inf")
-            if self.best_b is not None:
-                global_LB = min(global_LB, self.best_F)
-
-            if self.best_b is not None and global_LB >= self.best_F - self.eps_obj:
-                if self.verbose:
-                    print(f"[BS] CERTIFIED: gLB={global_LB:.6f} >= bestF={self.best_F:.6f}")
-                certified = True
-                break
-
-            lb_key, _, _, node = heapq.heappop(heap)   # single pop
-            open_node_lbs.pop(node.id, None)
-            nodes_processed += 1
-
-            # Prune by incumbent
-            if self.best_b is not None and lb_key >= self.best_F - self.eps_obj:
-                continue
-
-            # Clip stale Lagrangian LB computed before incumbent improved
-            node_lb = max(self.lb_box_L1(node.bL, node.bU), float(node.olb))
-            if self.best_b is not None and node_lb > self.best_F + self.eps_obj:
-                if self.verbose:
-                    print(f"  [LB_CLIP] node={node.id} olb={node.olb:.4f} "
-                          f"clipped to bestF={self.best_F:.4f}")
-                node.olb = self.best_F
-                node_lb  = self.best_F
-
-            if self.verbose:
-                gLB = min(open_node_lbs.values()) if open_node_lbs else node_lb
-                gLB = min(gLB, self.best_F) if self.best_b is not None else gLB
-                gap_pct = (self.best_F - gLB) / max(abs(self.best_F), 1e-9) * 100
-                print(f"[BS] node={node.id:04d} olb={node.olb:.4f} "
-                      f"inner=[{node.inner_lb:.2f},{node.inner_ub:.2f}] "
-                      f"bestF={self.best_F:.4f} gLB={gLB:.4f} gap={gap_pct:.1f}%")
-
-            # Inner fathoming (re-checked with latest best_inner_ub)
-            if node.inner_lb > self.best_inner_ub + self.eps_obj:
-                if self.verbose:
-                    print(f"  [FATHOM-INNER] node={node.id}")
-                continue
-
-            # OUB: test candidate b vectors
-            any_oub_ok = False
-            for b in self._oub_candidates(node):
-                ok, vp, vD = self.weak_ok(b)
-                if ok:
-                    any_oub_ok = True
-                    self._update_incumbent(b, self.F(b), vp, vD, f"node={node.id:04d}")
-
-            if not any_oub_ok:
-                node.oub_failures += 1
-            else:
-                node.oub_failures = 0
-
-            # Structural fathom
-            if (node.oub_failures >= 2
-                    and node_lb <= self.eps_obj
-                    and node.inner_lb >= self.best_F - self.eps_obj):
-                if self.verbose:
-                    print(f"  [FATHOM-STRUCT] node={node.id:04d}")
-                continue
-
-            # Branch and initialise children
-            n1, n2 = self._branch(node)
-            if n1 is None:
-                continue
-
-            for child in (n1, n2):
-                self._init_node(
-                    child, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
-                    warm_start_b=node.b_star_lb)   # #1 — inherit parent OLB solution
-                if not np.isfinite(child.olb):
-                    continue
-                child_lb = max(self.lb_box_L1(child.bL, child.bU), child.olb)
-                # Clip child LB before storing
+                # Global LB: min over open nodes, clipped to never exceed best_F
+                global_LB = min(open_node_lbs.values()) if open_node_lbs else float("inf")
                 if self.best_b is not None:
-                    child_lb = min(child_lb, self.best_F)
-                if self.best_b is not None and child_lb >= self.best_F - self.eps_obj:
+                    global_LB = min(global_LB, self.best_F)
+
+                if self.best_b is not None and global_LB >= self.best_F - self.eps_obj:
+                    if self.verbose:
+                        print(f"[BS] CERTIFIED: gLB={global_LB:.6f} >= bestF={self.best_F:.6f}")
+                    certified = True
+                    break
+
+                lb_key, _, _, node = heapq.heappop(heap)
+                open_node_lbs.pop(node.id, None)
+                nodes_processed += 1
+
+                # Prune by incumbent
+                if self.best_b is not None and lb_key >= self.best_F - self.eps_obj:
                     continue
-                heapq.heappush(heap, (child_lb, tie, child.id, child))
-                open_node_lbs[child.id] = child_lb
-                tie += 1
+
+                # Clip stale Lagrangian LB computed before incumbent improved
+                node_lb = max(self.lb_box_L1(node.bL, node.bU), float(node.olb))
+                if self.best_b is not None and node_lb > self.best_F + self.eps_obj:
+                    if self.verbose:
+                        print(f"  [LB_CLIP] node={node.id} olb={node.olb:.4f} "
+                              f"clipped to bestF={self.best_F:.4f}")
+                    node.olb = self.best_F
+                    node_lb  = self.best_F
+
+                if self.verbose:
+                    gLB = min(open_node_lbs.values()) if open_node_lbs else node_lb
+                    gLB = min(gLB, self.best_F) if self.best_b is not None else gLB
+                    gap_pct = (self.best_F - gLB) / max(abs(self.best_F), 1e-9) * 100
+                    print(f"[BS] node={node.id:04d} olb={node.olb:.4f} "
+                          f"inner=[{node.inner_lb:.2f},{node.inner_ub:.2f}] "
+                          f"bestF={self.best_F:.4f} gLB={gLB:.4f} gap={gap_pct:.1f}%")
+
+                # Inner fathoming (re-checked with latest best_inner_ub)
+                if node.inner_lb > self.best_inner_ub + self.eps_obj:
+                    if self.verbose:
+                        print(f"  [FATHOM-INNER] node={node.id}")
+                    continue
+
+                # OUB: test candidate b vectors
+                any_oub_ok = False
+                for b in self._oub_candidates(node):
+                    ok, vp, vD = self.weak_ok(b)
+                    if ok:
+                        any_oub_ok = True
+                        self._update_incumbent(b, self.F(b), vp, vD, f"node={node.id:04d}")
+
+                if not any_oub_ok:
+                    node.oub_failures += 1
+                else:
+                    node.oub_failures = 0
+
+                # Structural fathom
+                if (node.oub_failures >= 2
+                        and node_lb <= self.eps_obj
+                        and node.inner_lb >= self.best_F - self.eps_obj):
+                    if self.verbose:
+                        print(f"  [FATHOM-STRUCT] node={node.id:04d}")
+                    continue
+
+                # Branch and initialise children
+                n1, n2 = self._branch(node)
+                if n1 is None:
+                    continue
+
+                for child in (n1, n2):
+                    self._init_node(
+                        child, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
+                        warm_start_b=node.b_star_lb)
+                    if not np.isfinite(child.olb):
+                        continue
+                    child_lb = max(self.lb_box_L1(child.bL, child.bU), child.olb)
+                    if self.best_b is not None:
+                        child_lb = min(child_lb, self.best_F)
+                    if self.best_b is not None and child_lb >= self.best_F - self.eps_obj:
+                        continue
+                    heapq.heappush(heap, (child_lb, tie, child.id, child))
+                    open_node_lbs[child.id] = child_lb
+                    tie += 1
+
+                # Periodic checkpoint
+                if (self.checkpoint_path is not None
+                        and nodes_processed % self.checkpoint_interval == 0):
+                    gLB_ckpt = min(open_node_lbs.values()) if open_node_lbs else self.best_F
+                    if self.best_b is not None:
+                        gLB_ckpt = min(gLB_ckpt, self.best_F)
+                    self._save_checkpoint(nodes_processed, gLB_ckpt)
+
+        finally:
+            self._keepalive.stop()
 
         # ── Final global LB ──────────────────────────────────────────
         node_budget_exhausted = (not certified) and (nodes_processed >= self.max_nodes) and heap
@@ -748,6 +901,9 @@ class UCBranchAndSandwichWCE_4b:
         gap = ((self.best_F - global_LB)
                if (self.best_b is not None and np.isfinite(global_LB))
                else float("inf"))
+
+        # Final checkpoint
+        self._save_checkpoint(nodes_processed, global_LB)
 
         return {
             "success":        self.best_b is not None,

@@ -12,6 +12,39 @@ from gurobipy import GRB
 
 
 # ============================================================
+# 0) Gurobi license-retry helper
+# ============================================================
+
+import time as _time
+
+def _optimize_with_retry(m: gp.Model, max_retries: int = 3, wait: float = 30.0) -> None:
+    """
+    Call m.optimize() with retry logic for transient Gurobi license errors
+    (GurobiError errno 6 — cannot reach token.gurobi.com).
+
+    On a license error, checks whether the model object is still usable
+    (m.Status accessible) before retrying. If the model is dead, re-raises.
+    """
+    for attempt in range(max_retries):
+        try:
+            m.optimize()
+            return
+        except gp.GurobiError as e:
+            if e.errno != 6 or attempt >= max_retries - 1:
+                raise
+            # Check whether the model object survived the exception
+            try:
+                _ = m.Status  # will throw if model is internally corrupted
+            except gp.GurobiError:
+                raise e  # model is dead — re-raise original error
+            print(
+                f"[Gurobi] License refresh failed (errno=6), "
+                f"retry {attempt + 1}/{max_retries} in {wait:.0f}s ..."
+            )
+            _time.sleep(wait)
+
+
+# ============================================================
 # 0) Dataclasses (data model)
 # ============================================================
 
@@ -534,13 +567,15 @@ def solve_uc_with_cost(
     if time_limit is not None:
         m.Params.TimeLimit = float(time_limit)
 
-    m.optimize()
+    _optimize_with_retry(m)
 
     if m.Status != GRB.OPTIMAL:
-        return m, None, None
+        m.dispose()
+        return None, None, None
 
     sol, z = extract_sol_and_z(m, var, idx)
-    return m, sol, z
+    m.dispose()
+    return None, sol, z
 
 
 def total_curtailment(sol: Dict) -> float:
@@ -791,13 +826,15 @@ def solve_uc_with_cost_4b(
     if time_limit is not None:
         m.Params.TimeLimit = float(time_limit)
 
-    m.optimize()
+    _optimize_with_retry(m)
 
     if m.Status != GRB.OPTIMAL:
-        return m, None, None
+        m.dispose()
+        return None, None, None
 
     sol, z = extract_sol_and_z(m, var, idx)
-    return m, sol, z
+    m.dispose()
+    return None, sol, z
 
 def make_curtailment_foil_4b(data: NetworkUCData, alpha: float, C_factual: float):
     rhs = (1.0 - float(alpha)) * float(C_factual)
