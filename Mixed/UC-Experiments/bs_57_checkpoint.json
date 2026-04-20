@@ -1,0 +1,9 @@
+{
+  "best_F": Infinity,
+  "best_b": null,
+  "best_v_plain": null,
+  "best_v_foil": null,
+  "best_inner_ub": 95759655.21244055,
+  "nodes_processed": 0,
+  "global_LB": Infinity
+}
