@@ -559,6 +559,20 @@
       "no_load_cost": 837,
       "fuel_cost": 63.7,
       "emission_rate": 0.88
+    },
+    {
+      "bus": 10,
+      "Pmin": 0.0,
+      "Pmax": 250.0,
+      "RU": 75.0,
+      "RD": 75.0,
+      "UT": 4,
+      "DT": 4,
+      "SU_cost": 2500.0,
+      "SD_cost": 500.0,
+      "no_load_cost": 550.0,
+      "fuel_cost": 49.0,
+      "emission_rate": 0.42
     }
   ],
   "rens": [
