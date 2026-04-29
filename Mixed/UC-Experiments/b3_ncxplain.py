@@ -514,12 +514,95 @@ def _build_and_solve_b3_mp(
     return out
 
 
+def _make_percentage_bounds(
+    base,
+    beta: float,
+    *,
+    enforce_nonnegative: bool = True,
+    zero_abs_cap: float = 0.0,
+    name: str = "cost",
+):
+    """
+    Build elementwise bounds around a base cost array:
 
+        base_i * (1 - beta) <= c_i <= base_i * (1 + beta)
+
+    with robust handling of:
+      - beta > 1, which could otherwise produce negative lower bounds;
+      - base_i = 0;
+      - nonnegative interpretability requirements.
+
+    Parameters
+    ----------
+    base : array-like
+        Base cost coefficients c0_m.
+    beta : float
+        Maximum relative perturbation. Example: beta=0.2 means +/-20%.
+    enforce_nonnegative : bool
+        If True, mutable costs are constrained to be >= 0.
+    zero_abs_cap : float
+        If base_i == 0, percentage bounds would force c_i = 0.
+        If zero_abs_cap > 0, then zero-base entries get:
+            [0, zero_abs_cap] if enforce_nonnegative=True
+            [-zero_abs_cap, zero_abs_cap] otherwise.
+    name : str
+        Used only for clearer error messages.
+
+    Returns
+    -------
+    lb, ub : np.ndarray
+        Elementwise lower and upper bounds.
+    """
+    base = np.asarray(base, dtype=float)
+
+    beta = float(beta)
+    if beta < 0:
+        raise ValueError("perturbation_beta must be nonnegative.")
+
+    if enforce_nonnegative and np.any(base < -1e-12):
+        bad = np.where(base < -1e-12)
+        raise ValueError(
+            f"{name} has negative base coefficients. "
+            "This is not interpretable under enforce_nonnegative=True. "
+            f"Negative entries found at indices {bad}."
+        )
+
+    lo = base * (1.0 - beta)
+    hi = base * (1.0 + beta)
+
+    lb = np.minimum(lo, hi)
+    ub = np.maximum(lo, hi)
+
+    # Handle zero base costs.
+    if zero_abs_cap > 0.0:
+        zero_mask = np.isclose(base, 0.0)
+        lb = lb.copy()
+        ub = ub.copy()
+
+        if enforce_nonnegative:
+            lb[zero_mask] = 0.0
+            ub[zero_mask] = float(zero_abs_cap)
+        else:
+            lb[zero_mask] = -float(zero_abs_cap)
+            ub[zero_mask] = float(zero_abs_cap)
+
+    # Interpretability: no negative mutable costs.
+    if enforce_nonnegative:
+        lb = np.maximum(lb, 0.0)
+        ub = np.maximum(ub, 0.0)
+
+    if np.any(lb > ub + 1e-12):
+        raise ValueError(
+            f"Invalid percentage bounds for {name}: some lower bounds exceed upper bounds."
+        )
+
+    return lb, ub
 
 def _solve_ncxplain_mp_with_auto_bounds(
     *,
     # dimensions
     nG: int, nB: int, nR: int, T: int,
+
     # base coefficients
     base_pi_plus: np.ndarray | None,
     base_pi_minus: np.ndarray | None,
@@ -528,10 +611,12 @@ def _solve_ncxplain_mp_with_auto_bounds(
     base_no_load_cost: np.ndarray | None,
     base_su_cost: np.ndarray | None,
     base_sd_cost: np.ndarray | None,
-    # fixed part (constant across MP)
+
+    # fixed part
     fixed_idx: np.ndarray,
     c0_fixed: np.ndarray,
     xFoil_fixed: np.ndarray,
+
     # foil blocks
     xFoil_splus: np.ndarray | None,
     xFoil_sminus: np.ndarray | None,
@@ -540,218 +625,492 @@ def _solve_ncxplain_mp_with_auto_bounds(
     xFoil_u: np.ndarray | None,
     xFoil_su: np.ndarray | None,
     xFoil_sd: np.ndarray | None,
-    # cuts: list of z vectors (full z), but we pass already-extracted blocks for speed
+
+    # cuts
     cuts_blocks: list[dict],
+
     # mutables selection
     mutables: set[str],
-    # bounds dict
+
+    # old-style absolute bounds dictionary
     bounds: dict,
-    # weights dict for objective
+
+    # weights
     weights: dict,
-    # misc
+
+    # solver controls
     mp_time_limit: float = 60.0,
     output_flag_mp: int = 0,
     it: int = 1,
+
+    # bound expansion controls
     auto_expand_bounds: bool = True,
     max_expand_rounds: int = 4,
+
+    # NEW: percentage perturbation controls
+    perturbation_beta: float | None = None,
+    zero_abs_cap: float = 0.0,
+    enforce_nonnegative_costs: bool = True,
 ):
     """
-    MP (linear) for NCXplain:
-      minimize weighted L1 deviation of enabled mutable coefficients from base
-      s.t. for every cut k:  c_new^T x_foil <= c_new^T x_cut(k)
+    NCXplain master problem:
 
-    bounds:
-      bounds["pi"] = (lb, ub)
-      bounds["curt_cost"] = (lb, ub)
-      bounds["fuel"] = (lb, ub)
-      bounds["no_load"] = (lb, ub)
-      bounds["su"] = (lb, ub)
-      bounds["sd"] = (lb, ub)
+        min weighted L1 distance from base cost coefficients
 
-    weights:
-      weights["pi"], weights["curt_cost"], weights["gen_costs"]
+        s.t. c_new^T x_foil <= c_new^T x_cut(k), for all generated cuts k.
+
+    If perturbation_beta is not None, mutable coefficients are constrained by:
+
+        c0_m * (1 - beta) <= c_m <= c0_m * (1 + beta)
+
+    with lower bounds clamped to zero when enforce_nonnegative_costs=True.
+
+    Important:
+        If perturbation_beta is used, auto_expand_bounds is disabled internally,
+        because expanding bounds would violate the intended percentage cap.
     """
 
     mutables = set(mutables)
 
-    # ---------- validation ----------
+    if perturbation_beta is not None:
+        beta = float(perturbation_beta)
+        if beta < 0:
+            raise ValueError("perturbation_beta must be nonnegative.")
+
+        # Percentage bounds are intended to be hard interpretability bounds.
+        auto_expand_bounds = False
+
+    # ------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------
     def _need(key):
         if key not in bounds:
-            raise ValueError(f"bounds must contain key '{key}' when corresponding mutable is enabled.")
+            raise ValueError(
+                f"bounds must contain key '{key}' when the corresponding mutable is enabled."
+            )
         return bounds[key]
 
-    if "pi" in mutables:
-        pi_lb, pi_ub = _need("pi")
-    if "curt_cost" in mutables:
-        curt_lb, curt_ub = _need("curt_cost")
-    if "gen_costs" in mutables:
-        fuel_lb, fuel_ub = _need("fuel")
-        nl_lb, nl_ub = _need("no_load")
-        su_lb, su_ub = _need("su")
-        sd_lb, sd_ub = _need("sd")
+    def _bounds_to_arrays(pair, shape, name):
+        """
+        Accept either scalar bounds or array bounds.
+        Returns lb_arr, ub_arr with the requested shape.
+        """
+        lb, ub = pair
 
+        if np.isscalar(lb):
+            lb_arr = np.full(shape, float(lb), dtype=float)
+        else:
+            lb_arr = np.asarray(lb, dtype=float)
+            if lb_arr.shape != shape:
+                raise ValueError(
+                    f"{name} lower bound has shape {lb_arr.shape}, expected {shape}."
+                )
+
+        if np.isscalar(ub):
+            ub_arr = np.full(shape, float(ub), dtype=float)
+        else:
+            ub_arr = np.asarray(ub, dtype=float)
+            if ub_arr.shape != shape:
+                raise ValueError(
+                    f"{name} upper bound has shape {ub_arr.shape}, expected {shape}."
+                )
+
+        if enforce_nonnegative_costs:
+            lb_arr = np.maximum(lb_arr, 0.0)
+            ub_arr = np.maximum(ub_arr, 0.0)
+
+        if np.any(lb_arr > ub_arr + 1e-12):
+            raise ValueError(f"{name} has lower bound greater than upper bound.")
+
+        return lb_arr, ub_arr
+
+    def _expand_array_bounds(lb_arr, ub_arr, fac):
+        """
+        Expand array bounds away from zero.
+
+        This is only used when perturbation_beta is None.
+        When perturbation_beta is active, auto_expand_bounds is disabled.
+        """
+        if fac <= 1.0:
+            return lb_arr, ub_arr
+
+        lb_new = lb_arr * fac
+        ub_new = ub_arr * fac
+
+        if enforce_nonnegative_costs:
+            lb_new = np.maximum(lb_new, 0.0)
+            ub_new = np.maximum(ub_new, 0.0)
+
+        return lb_new, ub_new
+
+    # ------------------------------------------------------------
+    # Build bounds for mutable variables
+    # ------------------------------------------------------------
+
+    # pi_plus and pi_minus
+    if "pi" in mutables:
+        if perturbation_beta is not None:
+            piP_lb_base, piP_ub_base = _make_percentage_bounds(
+                base_pi_plus,
+                perturbation_beta,
+                enforce_nonnegative=enforce_nonnegative_costs,
+                zero_abs_cap=zero_abs_cap,
+                name="pi_plus",
+            )
+            piM_lb_base, piM_ub_base = _make_percentage_bounds(
+                base_pi_minus,
+                perturbation_beta,
+                enforce_nonnegative=enforce_nonnegative_costs,
+                zero_abs_cap=zero_abs_cap,
+                name="pi_minus",
+            )
+        else:
+            # Allows either separate pi_plus/pi_minus bounds or shared pi bounds.
+            if "pi_plus" in bounds and "pi_minus" in bounds:
+                piP_lb_base, piP_ub_base = _bounds_to_arrays(
+                    bounds["pi_plus"], (nB, T), "pi_plus"
+                )
+                piM_lb_base, piM_ub_base = _bounds_to_arrays(
+                    bounds["pi_minus"], (nB, T), "pi_minus"
+                )
+            else:
+                pi_lb, pi_ub = _need("pi")
+                piP_lb_base, piP_ub_base = _bounds_to_arrays(
+                    (pi_lb, pi_ub), (nB, T), "pi_plus"
+                )
+                piM_lb_base, piM_ub_base = _bounds_to_arrays(
+                    (pi_lb, pi_ub), (nB, T), "pi_minus"
+                )
+
+    # curtailment cost
+    if "curt_cost" in mutables:
+        if perturbation_beta is not None:
+            curt_lb_base, curt_ub_base = _make_percentage_bounds(
+                base_curt_cost,
+                perturbation_beta,
+                enforce_nonnegative=enforce_nonnegative_costs,
+                zero_abs_cap=zero_abs_cap,
+                name="curt_cost",
+            )
+        else:
+            curt_lb, curt_ub = _need("curt_cost")
+            curt_lb_base, curt_ub_base = _bounds_to_arrays(
+                (curt_lb, curt_ub), (nR, T), "curt_cost"
+            )
+
+    # generator costs
+    if "gen_costs" in mutables:
+        if perturbation_beta is not None:
+            fuel_lb_base, fuel_ub_base = _make_percentage_bounds(
+                base_fuel_cost,
+                perturbation_beta,
+                enforce_nonnegative=enforce_nonnegative_costs,
+                zero_abs_cap=zero_abs_cap,
+                name="fuel_cost",
+            )
+            nl_lb_base, nl_ub_base = _make_percentage_bounds(
+                base_no_load_cost,
+                perturbation_beta,
+                enforce_nonnegative=enforce_nonnegative_costs,
+                zero_abs_cap=zero_abs_cap,
+                name="no_load_cost",
+            )
+            su_lb_base, su_ub_base = _make_percentage_bounds(
+                base_su_cost,
+                perturbation_beta,
+                enforce_nonnegative=enforce_nonnegative_costs,
+                zero_abs_cap=zero_abs_cap,
+                name="su_cost",
+            )
+            sd_lb_base, sd_ub_base = _make_percentage_bounds(
+                base_sd_cost,
+                perturbation_beta,
+                enforce_nonnegative=enforce_nonnegative_costs,
+                zero_abs_cap=zero_abs_cap,
+                name="sd_cost",
+            )
+        else:
+            fuel_lb, fuel_ub = _need("fuel")
+            nl_lb, nl_ub = _need("no_load")
+            su_lb, su_ub = _need("su")
+            sd_lb, sd_ub = _need("sd")
+
+            fuel_lb_base, fuel_ub_base = _bounds_to_arrays(
+                (fuel_lb, fuel_ub), (nG,), "fuel_cost"
+            )
+            nl_lb_base, nl_ub_base = _bounds_to_arrays(
+                (nl_lb, nl_ub), (nG,), "no_load_cost"
+            )
+            su_lb_base, su_ub_base = _bounds_to_arrays(
+                (su_lb, su_ub), (nG,), "su_cost"
+            )
+            sd_lb_base, sd_ub_base = _bounds_to_arrays(
+                (sd_lb, sd_ub), (nG,), "sd_cost"
+            )
+
+    # ------------------------------------------------------------
+    # Objective weights
+    # ------------------------------------------------------------
     w_pi = float(weights.get("pi", 1.0))
     w_curt = float(weights.get("curt_cost", 1.0))
     w_gen = float(weights.get("gen_costs", 1.0))
 
-    # ---------- auto-bound expansion loop ----------
+    # ------------------------------------------------------------
+    # Main solve / optional expansion loop
+    # ------------------------------------------------------------
     expand_round = 0
     expand_factor = 1.0
 
     while True:
-        # expanded bounds (symmetric scaling around 0)
-        def _expand(lb, ub, fac):
-            # simple expansion: widen interval away from 0
-            if fac <= 1.0:
-                return float(lb), float(ub)
-            return float(lb) * fac, float(ub) * fac
+        # Effective bounds for this expansion round.
+        # If perturbation_beta is active, this loop runs once only.
+        if "pi" in mutables:
+            piP_lb, piP_ub = _expand_array_bounds(
+                piP_lb_base, piP_ub_base, expand_factor
+            )
+            piM_lb, piM_ub = _expand_array_bounds(
+                piM_lb_base, piM_ub_base, expand_factor
+            )
+
+        if "curt_cost" in mutables:
+            curt_lb_arr, curt_ub_arr = _expand_array_bounds(
+                curt_lb_base, curt_ub_base, expand_factor
+            )
+
+        if "gen_costs" in mutables:
+            fuel_lb_arr, fuel_ub_arr = _expand_array_bounds(
+                fuel_lb_base, fuel_ub_base, expand_factor
+            )
+            nl_lb_arr, nl_ub_arr = _expand_array_bounds(
+                nl_lb_base, nl_ub_base, expand_factor
+            )
+            su_lb_arr, su_ub_arr = _expand_array_bounds(
+                su_lb_base, su_ub_base, expand_factor
+            )
+            sd_lb_arr, sd_ub_arr = _expand_array_bounds(
+                sd_lb_base, sd_ub_base, expand_factor
+            )
 
         m = gp.Model(f"NCXplain_MP_it{it}_ex{expand_round}")
         m.Params.OutputFlag = int(output_flag_mp)
         if mp_time_limit is not None:
             m.Params.TimeLimit = float(mp_time_limit)
 
-        # ---------------- variables ----------------
-        # We'll create only variables for enabled mutables.
+        # --------------------------------------------------------
+        # Variables
+        # --------------------------------------------------------
 
-        # --- pi vars (nB,T) ---
+        # Shift-price variables
         if "pi" in mutables:
-            lb, ub = _expand(pi_lb, pi_ub, expand_factor)
-            piP = m.addVars(nB, T, lb=lb, ub=ub, name="pi_plus")
-            piM = m.addVars(nB, T, lb=lb, ub=ub, name="pi_minus")
+            piP = m.addVars(nB, T, name="pi_plus")
+            piM = m.addVars(nB, T, name="pi_minus")
 
-            # abs dev
-            dP = m.addVars(nB, T, lb=0.0, name="abs_dpi_plus")
-            dM = m.addVars(nB, T, lb=0.0, name="abs_dpi_minus")
+            dPiP = m.addVars(nB, T, lb=0.0, name="abs_dpi_plus")
+            dPiM = m.addVars(nB, T, lb=0.0, name="abs_dpi_minus")
 
             for b in range(nB):
                 for t in range(T):
+                    piP[b, t].LB = float(piP_lb[b, t])
+                    piP[b, t].UB = float(piP_ub[b, t])
+
+                    piM[b, t].LB = float(piM_lb[b, t])
+                    piM[b, t].UB = float(piM_ub[b, t])
+
                     baseP = float(base_pi_plus[b, t])
                     baseM = float(base_pi_minus[b, t])
-                    m.addConstr(dP[b, t] >=  piP[b, t] - baseP)
-                    m.addConstr(dP[b, t] >= -piP[b, t] + baseP)
-                    m.addConstr(dM[b, t] >=  piM[b, t] - baseM)
-                    m.addConstr(dM[b, t] >= -piM[b, t] + baseM)
 
-        # --- curt_cost vars (nR,T) ---
+                    m.addConstr(dPiP[b, t] >=  piP[b, t] - baseP)
+                    m.addConstr(dPiP[b, t] >= -piP[b, t] + baseP)
+
+                    m.addConstr(dPiM[b, t] >=  piM[b, t] - baseM)
+                    m.addConstr(dPiM[b, t] >= -piM[b, t] + baseM)
+
+        # Curtailment-cost variables
         if "curt_cost" in mutables:
-            lb, ub = _expand(curt_lb, curt_ub, expand_factor)
-            cc = m.addVars(nR, T, lb=lb, ub=ub, name="curt_cost")
+            cc = m.addVars(nR, T, name="curt_cost")
             dC = m.addVars(nR, T, lb=0.0, name="abs_dcurt")
 
             for r in range(nR):
                 for t in range(T):
+                    cc[r, t].LB = float(curt_lb_arr[r, t])
+                    cc[r, t].UB = float(curt_ub_arr[r, t])
+
                     baseC = float(base_curt_cost[r, t])
+
                     m.addConstr(dC[r, t] >=  cc[r, t] - baseC)
                     m.addConstr(dC[r, t] >= -cc[r, t] + baseC)
 
-        # --- generator costs (per generator scalar, applied across time) ---
+        # Generator-cost variables
         if "gen_costs" in mutables:
-            f_lb, f_ub = _expand(fuel_lb, fuel_ub, expand_factor)
-            nl_lb2, nl_ub2 = _expand(nl_lb, nl_ub, expand_factor)
-            su_lb2, su_ub2 = _expand(su_lb, su_ub, expand_factor)
-            sd_lb2, sd_ub2 = _expand(sd_lb, sd_ub, expand_factor)
+            fc = m.addVars(nG, name="fuel_cost")
+            nl = m.addVars(nG, name="no_load_cost")
+            suc = m.addVars(nG, name="su_cost")
+            sdc = m.addVars(nG, name="sd_cost")
 
-            fc = m.addVars(nG, lb=f_lb, ub=f_ub, name="fuel_cost")
-            nl = m.addVars(nG, lb=nl_lb2, ub=nl_ub2, name="no_load_cost")
-            suc = m.addVars(nG, lb=su_lb2, ub=su_ub2, name="su_cost")
-            sdc = m.addVars(nG, lb=sd_lb2, ub=sd_ub2, name="sd_cost")
-
-            df = m.addVars(nG, lb=0.0, name="abs_dfuel")
-            dn = m.addVars(nG, lb=0.0, name="abs_dnl")
-            dsu = m.addVars(nG, lb=0.0, name="abs_dsu")
-            dsd = m.addVars(nG, lb=0.0, name="abs_dsd")
+            dFuel = m.addVars(nG, lb=0.0, name="abs_dfuel")
+            dNL = m.addVars(nG, lb=0.0, name="abs_dnl")
+            dSU = m.addVars(nG, lb=0.0, name="abs_dsu")
+            dSD = m.addVars(nG, lb=0.0, name="abs_dsd")
 
             for g in range(nG):
-                bfc = float(base_fuel_cost[g])
-                bnl = float(base_no_load_cost[g])
-                bsu = float(base_su_cost[g])
-                bsd = float(base_sd_cost[g])
+                fc[g].LB = float(fuel_lb_arr[g])
+                fc[g].UB = float(fuel_ub_arr[g])
 
-                m.addConstr(df[g]  >=  fc[g] - bfc); m.addConstr(df[g]  >= -fc[g] + bfc)
-                m.addConstr(dn[g]  >=  nl[g] - bnl); m.addConstr(dn[g]  >= -nl[g] + bnl)
-                m.addConstr(dsu[g] >= suc[g] - bsu); m.addConstr(dsu[g] >= -suc[g] + bsu)
-                m.addConstr(dsd[g] >= sdc[g] - bsd); m.addConstr(dsd[g] >= -sdc[g] + bsd)
+                nl[g].LB = float(nl_lb_arr[g])
+                nl[g].UB = float(nl_ub_arr[g])
 
-        # ---------------- objective ----------------
-        obj = 0.0
+                suc[g].LB = float(su_lb_arr[g])
+                suc[g].UB = float(su_ub_arr[g])
+
+                sdc[g].LB = float(sd_lb_arr[g])
+                sdc[g].UB = float(sd_ub_arr[g])
+
+                baseFuel = float(base_fuel_cost[g])
+                baseNL = float(base_no_load_cost[g])
+                baseSU = float(base_su_cost[g])
+                baseSD = float(base_sd_cost[g])
+
+                m.addConstr(dFuel[g] >=  fc[g] - baseFuel)
+                m.addConstr(dFuel[g] >= -fc[g] + baseFuel)
+
+                m.addConstr(dNL[g] >=  nl[g] - baseNL)
+                m.addConstr(dNL[g] >= -nl[g] + baseNL)
+
+                m.addConstr(dSU[g] >=  suc[g] - baseSU)
+                m.addConstr(dSU[g] >= -suc[g] + baseSU)
+
+                m.addConstr(dSD[g] >=  sdc[g] - baseSD)
+                m.addConstr(dSD[g] >= -sdc[g] + baseSD)
+
+        # --------------------------------------------------------
+        # Objective: weighted L1 perturbation
+        # --------------------------------------------------------
+        obj = gp.LinExpr()
+
         if "pi" in mutables:
-            obj += w_pi * (gp.quicksum(dP[b, t] for b in range(nB) for t in range(T)) +
-                           gp.quicksum(dM[b, t] for b in range(nB) for t in range(T)))
+            obj += w_pi * (
+                gp.quicksum(dPiP[b, t] for b in range(nB) for t in range(T))
+                + gp.quicksum(dPiM[b, t] for b in range(nB) for t in range(T))
+            )
+
         if "curt_cost" in mutables:
-            obj += w_curt * gp.quicksum(dC[r, t] for r in range(nR) for t in range(T))
+            obj += w_curt * gp.quicksum(
+                dC[r, t] for r in range(nR) for t in range(T)
+            )
+
         if "gen_costs" in mutables:
-            obj += w_gen * (gp.quicksum(df[g] for g in range(nG)) +
-                            gp.quicksum(dn[g] for g in range(nG)) +
-                            gp.quicksum(dsu[g] for g in range(nG)) +
-                            gp.quicksum(dsd[g] for g in range(nG)))
+            obj += w_gen * (
+                gp.quicksum(dFuel[g] for g in range(nG))
+                + gp.quicksum(dNL[g] for g in range(nG))
+                + gp.quicksum(dSU[g] for g in range(nG))
+                + gp.quicksum(dSD[g] for g in range(nG))
+            )
 
         m.setObjective(obj, GRB.MINIMIZE)
 
-        # ---------------- constraints (foil optimal vs cuts) ----------------
-        # For each cut k: c_new^T xFoil <= c_new^T xCut
-        # Move fixed part to RHS:
-        #   sum_mut c_mut·(xFoil - xCut) <= c0_fixed·(xCut_fixed - xFoil_fixed)
-
+        # --------------------------------------------------------
+        # NCXplain cuts:
+        #
+        #   c_new^T xFoil <= c_new^T xCut
+        #
+        # Equivalent:
+        #
+        #   sum_mut c_mut * (xFoil_mut - xCut_mut)
+        #       <= c0_fixed^T (xCut_fixed - xFoil_fixed)
+        # --------------------------------------------------------
         for k, blk in enumerate(cuts_blocks):
             xCut_fixed = blk["x_fixed"]
-            rhs = float(np.dot(c0_fixed, (xCut_fixed - xFoil_fixed)))
+            rhs = float(np.dot(c0_fixed, xCut_fixed - xFoil_fixed))
 
-            lhs = 0.0
+            lhs = gp.LinExpr()
 
             if "pi" in mutables:
-                dSplus  = (xFoil_splus  - blk["x_splus"])   # (nB,T)
-                dSminus = (xFoil_sminus - blk["x_sminus"])  # (nB,T)
-                lhs += gp.quicksum(piP[b, t] * float(dSplus[b, t]) for b in range(nB) for t in range(T))
-                lhs += gp.quicksum(piM[b, t] * float(dSminus[b, t]) for b in range(nB) for t in range(T))
+                dSplus = xFoil_splus - blk["x_splus"]
+                dSminus = xFoil_sminus - blk["x_sminus"]
+
+                lhs += gp.quicksum(
+                    piP[b, t] * float(dSplus[b, t])
+                    for b in range(nB)
+                    for t in range(T)
+                )
+                lhs += gp.quicksum(
+                    piM[b, t] * float(dSminus[b, t])
+                    for b in range(nB)
+                    for t in range(T)
+                )
 
             if "curt_cost" in mutables:
-                dCurt = (xFoil_curt - blk["x_curt"])  # (nR,T)
-                lhs += gp.quicksum(cc[r, t] * float(dCurt[r, t]) for r in range(nR) for t in range(T))
+                dCurt = xFoil_curt - blk["x_curt"]
+
+                lhs += gp.quicksum(
+                    cc[r, t] * float(dCurt[r, t])
+                    for r in range(nR)
+                    for t in range(T)
+                )
 
             if "gen_costs" in mutables:
-                # fuel scalar per gen applied across time: sum_t (pFoil - pCut)
-                dP = (xFoil_p - blk["x_p"])      # (nG,T)
-                dU = (xFoil_u - blk["x_u"])      # (nG,T)
-                dSU = (xFoil_su - blk["x_su"])   # (nG,T)
-                dSD = (xFoil_sd - blk["x_sd"])   # (nG,T)
+                dP = xFoil_p - blk["x_p"]
+                dU = xFoil_u - blk["x_u"]
+                dSU_blk = xFoil_su - blk["x_su"]
+                dSD_blk = xFoil_sd - blk["x_sd"]
 
                 for g in range(nG):
-                    lhs += fc[g]  * float(np.sum(dP[g, :]))
-                    lhs += nl[g]  * float(np.sum(dU[g, :]))
-                    lhs += suc[g] * float(np.sum(dSU[g, :]))
-                    lhs += sdc[g] * float(np.sum(dSD[g, :]))
+                    lhs += fc[g] * float(np.sum(dP[g, :]))
+                    lhs += nl[g] * float(np.sum(dU[g, :]))
+                    lhs += suc[g] * float(np.sum(dSU_blk[g, :]))
+                    lhs += sdc[g] * float(np.sum(dSD_blk[g, :]))
 
             m.addConstr(lhs <= rhs, name=f"foil_le_cut_{k}")
 
+        # --------------------------------------------------------
         # Solve MP
+        # --------------------------------------------------------
         m.optimize()
 
         if m.SolCount > 0 and m.Status in (GRB.OPTIMAL, GRB.TIME_LIMIT):
-            out = {"status": "OK", "mp_obj": float(m.ObjVal), "bounds_used_factor": expand_factor}
+            out = {
+                "status": "OK",
+                "mp_obj": float(m.ObjVal),
+                "bounds_used_factor": float(expand_factor),
+                "perturbation_beta": None if perturbation_beta is None else float(perturbation_beta),
+                "enforce_nonnegative_costs": bool(enforce_nonnegative_costs),
+            }
 
-            # extract
             if "pi" in mutables:
-                pi_plus_new  = np.array([[float(piP[b, t].X) for t in range(T)] for b in range(nB)], dtype=float)
-                pi_minus_new = np.array([[float(piM[b, t].X) for t in range(T)] for b in range(nB)], dtype=float)
+                pi_plus_new = np.array(
+                    [[float(piP[b, t].X) for t in range(T)] for b in range(nB)],
+                    dtype=float,
+                )
+                pi_minus_new = np.array(
+                    [[float(piM[b, t].X) for t in range(T)] for b in range(nB)],
+                    dtype=float,
+                )
             else:
-                pi_plus_new, pi_minus_new = base_pi_plus.copy(), base_pi_minus.copy()
+                pi_plus_new = base_pi_plus.copy()
+                pi_minus_new = base_pi_minus.copy()
 
             if "curt_cost" in mutables:
-                curt_cost_new = np.array([[float(cc[r, t].X) for t in range(T)] for r in range(nR)], dtype=float)
+                curt_cost_new = np.array(
+                    [[float(cc[r, t].X) for t in range(T)] for r in range(nR)],
+                    dtype=float,
+                )
             else:
-                curt_cost_new = base_curt_cost.copy() if base_curt_cost is not None else np.zeros((0, T), dtype=float)
+                curt_cost_new = (
+                    base_curt_cost.copy()
+                    if base_curt_cost is not None
+                    else np.zeros((0, T), dtype=float)
+                )
 
             if "gen_costs" in mutables:
-                fuel_new    = np.array([float(fc[g].X) for g in range(nG)], dtype=float)
+                fuel_new = np.array([float(fc[g].X) for g in range(nG)], dtype=float)
                 no_load_new = np.array([float(nl[g].X) for g in range(nG)], dtype=float)
-                su_new      = np.array([float(suc[g].X) for g in range(nG)], dtype=float)
-                sd_new      = np.array([float(sdc[g].X) for g in range(nG)], dtype=float)
+                su_new = np.array([float(suc[g].X) for g in range(nG)], dtype=float)
+                sd_new = np.array([float(sdc[g].X) for g in range(nG)], dtype=float)
             else:
-                fuel_new    = base_fuel_cost.copy()
+                fuel_new = base_fuel_cost.copy()
                 no_load_new = base_no_load_cost.copy()
-                su_new      = base_su_cost.copy()
-                sd_new      = base_sd_cost.copy()
+                su_new = base_su_cost.copy()
+                sd_new = base_sd_cost.copy()
 
             out.update({
                 "pi_plus_new": pi_plus_new,
@@ -762,15 +1121,34 @@ def _solve_ncxplain_mp_with_auto_bounds(
                 "su_cost_new": su_new,
                 "sd_cost_new": sd_new,
             })
+
             return out
 
-        # infeasible: expand bounds or stop
+        # --------------------------------------------------------
+        # Infeasible handling
+        # --------------------------------------------------------
+        if perturbation_beta is not None:
+            return {
+                "status": "MP_INFEASIBLE",
+                "m_status": int(m.Status),
+                "bounds_used_factor": float(expand_factor),
+                "perturbation_beta": float(perturbation_beta),
+                "message": (
+                    "MP infeasible under the requested percentage perturbation bounds. "
+                    "No explanation was found within the allowed perturbation range."
+                ),
+            }
+
         if not auto_expand_bounds or expand_round >= max_expand_rounds:
             return {
                 "status": "MP_INFEASIBLE",
                 "m_status": int(m.Status),
-                "bounds_used_factor": expand_factor,
-                "message": "MP infeasible (even after auto expansion)." if auto_expand_bounds else "MP infeasible."
+                "bounds_used_factor": float(expand_factor),
+                "message": (
+                    "MP infeasible even after auto expansion."
+                    if auto_expand_bounds
+                    else "MP infeasible."
+                ),
             }
 
         expand_round += 1
@@ -783,9 +1161,12 @@ def run_ncxplain_uc(
     window_size: int,
     per_bus_neutrality: bool,
     foil_fn,
-    mutables=None,                 # e.g. {"pi"} or {"gen_costs"} or {"pi","gen_costs"}
-    bounds=None,                   # dict; see defaults below
-    weights=None,                  # dict; see defaults below
+    mutables=None,
+    bounds=None,
+    weights=None,
+    perturbation_beta: float | None = None,
+    zero_abs_cap: float = 0.0,
+    enforce_nonnegative_costs: bool = True,
     tol_abs: float = 1e-3,
     tol_rel: float = 1e-6,
     max_iters: int = 30,
@@ -976,11 +1357,10 @@ def run_ncxplain_uc(
     xFoil_sminus = zFoil[idx.sminus]  if ("pi" in mutables and hasattr(idx, "sminus") and idx.sminus.size>0) else None
     xFoil_curt   = zFoil[idx.curt]    if ("curt_cost" in mutables and nR>0 and hasattr(idx, "curt") and idx.curt.size>0) else None
 
-    xFoil_p  = zFoil[idx.p]   if ("gen_costs" in mutables and hasattr(idx, "p") and idx.p.size>0) else None
-    xFoil_u  = zFoil[idx.u]   if ("gen_costs" in mutables and hasattr(idx, "u") and idx.u.size>0) else None
-    xFoil_su = zFoil[idx.su]  if ("gen_costs" in mutables and hasattr(idx, "su") and idx.su.size>0) else None
-    xFoil_sd = zFoil[idx.sd]  if ("gen_costs" in mutables and hasattr(idx, "sd") and idx.sd.size>0) else None
-
+    xFoil_p  = zFoil[idx.p] if ("gen_costs" in mutables and hasattr(idx, "p") and idx.p.size > 0) else None
+    xFoil_u  = zFoil[idx.u] if ("gen_costs" in mutables and hasattr(idx, "u") and idx.u.size > 0) else None
+    xFoil_su = zFoil[idx.v] if ("gen_costs" in mutables and hasattr(idx, "v") and idx.v.size > 0) else None
+    xFoil_sd = zFoil[idx.w] if ("gen_costs" in mutables and hasattr(idx, "w") and idx.w.size > 0) else None
     # --------------------------
     # 5) base params for mutables
     # --------------------------
@@ -1016,25 +1396,18 @@ def run_ncxplain_uc(
             c[idx.curt] = curt_cost_new
 
         if "gen_costs" in mutables:
-            # fuel applies to p[g,t]
             if hasattr(idx, "p") and idx.p.size > 0:
-                Pidx = idx.p
                 for g in range(nG):
-                    c[Pidx[g, :]] = fuel_cost_new[g]
-            # no-load applies to u[g,t]
+                    c[idx.p[g, :]] = fuel_cost_new[g]
             if hasattr(idx, "u") and idx.u.size > 0:
-                Uidx = idx.u
                 for g in range(nG):
-                    c[Uidx[g, :]] = no_load_new[g]
-            # SU/SD apply to su[g,t], sd[g,t]
-            if hasattr(idx, "su") and idx.su.size > 0:
-                SUidx = idx.su
+                    c[idx.u[g, :]] = no_load_new[g]
+            if hasattr(idx, "v") and idx.v.size > 0:
                 for g in range(nG):
-                    c[SUidx[g, :]] = su_cost_new[g]
-            if hasattr(idx, "sd") and idx.sd.size > 0:
-                SDidx = idx.sd
+                    c[idx.v[g, :]] = su_cost_new[g]
+            if hasattr(idx, "w") and idx.w.size > 0:
                 for g in range(nG):
-                    c[SDidx[g, :]] = sd_cost_new[g]
+                    c[idx.w[g, :]] = sd_cost_new[g]
 
         return c
 
@@ -1044,9 +1417,7 @@ def run_ncxplain_uc(
     cuts = []
     cuts_fp = set()
 
-    # fallback fingerprint if you don't have _fingerprint_solution_uc
     def _fingerprint(sol, decimals=3):
-        # try dict arrays
         if isinstance(sol, dict):
             def _arr(name):
                 a = sol.get(name, None)
@@ -1061,6 +1432,7 @@ def run_ncxplain_uc(
             )
         return ("unknown",)
 
+    # Seed with factual cut under c0
     if seed_with_factual_cut:
         cuts.append(zF.copy())
         cuts_fp.add(_fingerprint(solF, decimals=3))
@@ -1076,14 +1448,29 @@ def run_ncxplain_uc(
         "dTx_opt": None,
         "mp_details": None,
         "sol_factual": solF,
-        "sol_foil": solFoil,
+        "sol_foil": solFoil,   # updated each iter below
     }
+
+    # current foil solution — updated dynamically each iteration
+    zFoil_cur     = zFoil.copy()
+    solFoil_cur   = solFoil
 
     # --------------------------
     # 7) main loop
     # --------------------------
     for it in range(1, max_iters + 1):
-        # pre-extract cut blocks once for MP
+
+        # ── extract cut blocks using CURRENT foil ─────────────────────────
+        xFoil_fixed_cur  = zFoil_cur[fixed_idx]
+
+        xFoil_splus_cur  = zFoil_cur[idx.splus]  if ("pi" in mutables and hasattr(idx, "splus") and idx.splus.size > 0)  else None
+        xFoil_sminus_cur = zFoil_cur[idx.sminus] if ("pi" in mutables and hasattr(idx, "sminus") and idx.sminus.size > 0) else None
+        xFoil_curt_cur   = zFoil_cur[idx.curt]   if ("curt_cost" in mutables and nR > 0 and hasattr(idx, "curt") and idx.curt.size > 0) else None
+        xFoil_p_cur      = zFoil_cur[idx.p]      if ("gen_costs" in mutables and hasattr(idx, "p") and idx.p.size > 0) else None
+        xFoil_u_cur      = zFoil_cur[idx.u]      if ("gen_costs" in mutables and hasattr(idx, "u") and idx.u.size > 0) else None
+        xFoil_su_cur     = zFoil_cur[idx.v]      if ("gen_costs" in mutables and hasattr(idx, "v") and idx.v.size > 0) else None
+        xFoil_sd_cur     = zFoil_cur[idx.w]      if ("gen_costs" in mutables and hasattr(idx, "w") and idx.w.size > 0) else None
+
         cuts_blocks = []
         for zcut in cuts:
             blk = {"x_fixed": zcut[fixed_idx]}
@@ -1094,11 +1481,12 @@ def run_ncxplain_uc(
                 blk["x_curt"] = zcut[idx.curt]
             if "gen_costs" in mutables:
                 blk["x_p"]  = zcut[idx.p]
-                blk["x_u"]  = zcut[idx.u]   if hasattr(idx, "u") and idx.u.size>0 else np.zeros((nG, T))
-                blk["x_su"] = zcut[idx.su]  if hasattr(idx, "su") and idx.su.size>0 else np.zeros((nG, T))
-                blk["x_sd"] = zcut[idx.sd]  if hasattr(idx, "sd") and idx.sd.size>0 else np.zeros((nG, T))
+                blk["x_u"]  = zcut[idx.u]  if idx.u.size  > 0 else np.zeros((nG, T))
+                blk["x_su"] = zcut[idx.v] if idx.v.size > 0 else np.zeros((nG, T))
+                blk["x_sd"] = zcut[idx.w] if idx.w.size > 0 else np.zeros((nG, T))
             cuts_blocks.append(blk)
 
+        # ── solve MP ──────────────────────────────────────────────────────
         mp_out = _solve_ncxplain_mp_with_auto_bounds(
             nG=nG, nB=nB, nR=nR, T=T,
             base_pi_plus=base_pi_plus,
@@ -1110,14 +1498,14 @@ def run_ncxplain_uc(
             base_sd_cost=base_sd_cost,
             fixed_idx=fixed_idx,
             c0_fixed=c0_fixed,
-            xFoil_fixed=xFoil_fixed,
-            xFoil_splus=xFoil_splus,
-            xFoil_sminus=xFoil_sminus,
-            xFoil_curt=xFoil_curt,
-            xFoil_p=xFoil_p,
-            xFoil_u=xFoil_u if xFoil_u is not None else np.zeros((nG, T)),
-            xFoil_su=xFoil_su if xFoil_su is not None else np.zeros((nG, T)),
-            xFoil_sd=xFoil_sd if xFoil_sd is not None else np.zeros((nG, T)),
+            xFoil_fixed=xFoil_fixed_cur,       # dynamic
+            xFoil_splus=xFoil_splus_cur,
+            xFoil_sminus=xFoil_sminus_cur,
+            xFoil_curt=xFoil_curt_cur,
+            xFoil_p=xFoil_p_cur,
+            xFoil_u=xFoil_u_cur  if xFoil_u_cur  is not None else np.zeros((nG, T)),
+            xFoil_su=xFoil_su_cur if xFoil_su_cur is not None else np.zeros((nG, T)),
+            xFoil_sd=xFoil_sd_cur if xFoil_sd_cur is not None else np.zeros((nG, T)),
             cuts_blocks=cuts_blocks,
             mutables=mutables,
             bounds=bounds,
@@ -1126,13 +1514,19 @@ def run_ncxplain_uc(
             output_flag_mp=output_flag_mp,
             it=it,
             auto_expand_bounds=auto_expand_bounds,
+            perturbation_beta=perturbation_beta,
+            zero_abs_cap=zero_abs_cap,
+            enforce_nonnegative_costs=enforce_nonnegative_costs,
         )
 
         if mp_out.get("status") != "OK":
             mp_out["iter"] = it
+            mp_out["best_gap"]    = float(best["gap"])
+            mp_out["best_iter"]   = best["iter"]
+            mp_out["best_params"] = best["params"]
             return mp_out
 
-        # new params
+        # ── extract new cost params ───────────────────────────────────────
         pi_plus_new   = mp_out["pi_plus_new"]
         pi_minus_new  = mp_out["pi_minus_new"]
         curt_cost_new = mp_out["curt_cost_new"]
@@ -1141,7 +1535,6 @@ def run_ncxplain_uc(
         su_new        = mp_out["su_cost_new"]
         sd_new        = mp_out["sd_cost_new"]
 
-        # solve SP under new costs
         c_new = _build_cvec_from_mutables(
             pi_plus_new=pi_plus_new,
             pi_minus_new=pi_minus_new,
@@ -1152,88 +1545,63 @@ def run_ncxplain_uc(
             sd_cost_new=sd_new,
         )
 
+        # ── solve unconstrained SP under c_new ────────────────────────────
         mOpt, solOpt, zOpt = solve_uc_with_cost(
             data, idx, c_new,
             window_size, per_bus_neutrality,
             u_init, p_init, on_time_init, off_time_init,
             extra_constr_fn=None,
-            output_flag=output_flag_sp
+            output_flag=output_flag_sp,
         )
         if solOpt is None:
             return {"status": "SP_FAILED", "iter": it, "sp_status": int(mOpt.Status)}
 
-        # stopping test: dTx_foil - dTx_opt
-        xOpt_fixed = zOpt[fixed_idx]
-
-        dTx_foil = _compute_dTx_uc(
-            c0_fixed=c0_fixed, x_fixed=xFoil_fixed,
-            pi_plus=pi_plus_new if "pi" in mutables else None,
-            pi_minus=pi_minus_new if "pi" in mutables else None,
-            x_splus=xFoil_splus,
-            x_sminus=xFoil_sminus,
-            curt_cost=curt_cost_new if "curt_cost" in mutables else None,
-            x_curt=xFoil_curt,
-            fuel_cost=fuel_new if "gen_costs" in mutables else None,
-            no_load_cost=no_load_new if "gen_costs" in mutables else None,
-            su_cost=su_new if "gen_costs" in mutables else None,
-            sd_cost=sd_new if "gen_costs" in mutables else None,
-            x_p=xFoil_p,
-            x_u=xFoil_u if xFoil_u is not None else None,
-            x_su=xFoil_su if xFoil_su is not None else None,
-            x_sd=xFoil_sd if xFoil_sd is not None else None,
+        # ── re-solve FOIL SP under c_new (KEY FIX) ───────────────────────
+        mFoil_new, solFoil_new, zFoil_new = solve_uc_with_cost(
+            data, idx, c_new,
+            window_size, per_bus_neutrality,
+            u_init, p_init, on_time_init, off_time_init,
+            extra_constr_fn=foil_fn,
+            output_flag=output_flag_sp,
         )
+        if solFoil_new is None:
+            return {"status": "FOIL_SP_FAILED", "iter": it}
 
-        # extract opt blocks (only if needed)
-        xOpt_splus  = zOpt[idx.splus] if "pi" in mutables else None
-        xOpt_sminus = zOpt[idx.sminus] if "pi" in mutables else None
-        xOpt_curt   = zOpt[idx.curt] if ("curt_cost" in mutables and nR > 0) else None
-        xOpt_p      = zOpt[idx.p] if "gen_costs" in mutables else None
-        xOpt_u      = zOpt[idx.u] if ("gen_costs" in mutables and hasattr(idx, "u") and idx.u.size>0) else None
-        xOpt_su     = zOpt[idx.su] if ("gen_costs" in mutables and hasattr(idx, "su") and idx.su.size>0) else None
-        xOpt_sd     = zOpt[idx.sd] if ("gen_costs" in mutables and hasattr(idx, "sd") and idx.sd.size>0) else None
+        # update current foil for next iteration
+        zFoil_cur   = zFoil_new.copy()
+        solFoil_cur = solFoil_new
 
-        dTx_opt = _compute_dTx_uc(
-            c0_fixed=c0_fixed, x_fixed=xOpt_fixed,
-            pi_plus=pi_plus_new if "pi" in mutables else None,
-            pi_minus=pi_minus_new if "pi" in mutables else None,
-            x_splus=xOpt_splus,
-            x_sminus=xOpt_sminus,
-            curt_cost=curt_cost_new if "curt_cost" in mutables else None,
-            x_curt=xOpt_curt,
-            fuel_cost=fuel_new if "gen_costs" in mutables else None,
-            no_load_cost=no_load_new if "gen_costs" in mutables else None,
-            su_cost=su_new if "gen_costs" in mutables else None,
-            sd_cost=sd_new if "gen_costs" in mutables else None,
-            x_p=xOpt_p,
-            x_u=xOpt_u,
-            x_su=xOpt_su,
-            x_sd=xOpt_sd,
-        )
-
-        gap = float(dTx_foil - dTx_opt)
+        # ── gap = cost(foil under c_new) - cost(opt under c_new) ─────────
+        dTx_foil = float(np.dot(c_new, zFoil_new))
+        dTx_opt  = float(np.dot(c_new, zOpt))
+        gap      = dTx_foil - dTx_opt
         stop_tol = float(tol_abs + tol_rel * max(1.0, abs(dTx_opt)))
+
+        if verbose:
+            print(f"[NCX it={it:02d}] gap={gap:.6g} | stop_tol={stop_tol:.3g}"
+                  f" | MP_obj={mp_out.get('mp_obj', None):.6g}"
+                  f" | foil_cost={dTx_foil:.2f} | opt_cost={dTx_opt:.2f}")
 
         if gap < best["gap"]:
             best.update({
                 "gap": gap,
                 "iter": it,
+                "sol_foil": solFoil_new,
                 "params": {
-                    "pi_plus_new": pi_plus_new,
-                    "pi_minus_new": pi_minus_new,
-                    "curt_cost_new": curt_cost_new,
-                    "fuel_cost_new": fuel_new,
+                    "pi_plus_new":    pi_plus_new,
+                    "pi_minus_new":   pi_minus_new,
+                    "curt_cost_new":  curt_cost_new,
+                    "fuel_cost_new":  fuel_new,
                     "no_load_cost_new": no_load_new,
-                    "su_cost_new": su_new,
-                    "sd_cost_new": sd_new,
+                    "su_cost_new":    su_new,
+                    "sd_cost_new":    sd_new,
                 },
-                "dTx_foil": dTx_foil,
-                "dTx_opt": dTx_opt,
+                "dTx_foil":   dTx_foil,
+                "dTx_opt":    dTx_opt,
                 "mp_details": mp_out,
             })
 
-        if verbose:
-            print(f"[NCX it={it:02d}] gap={gap:.6g} | stop_tol={stop_tol:.3g} | MP_obj={mp_out.get('mp_obj', None)}")
-
+        # ── convergence ───────────────────────────────────────────────────
         if gap <= stop_tol:
             return {
                 "status": "OPTIMAL",
@@ -1241,20 +1609,20 @@ def run_ncxplain_uc(
                 "mutables": sorted(list(mutables)),
                 "bounds": bounds,
                 "weights": weights,
-                "z_foil": zFoil,
-                "z_opt": zOpt,
+                "z_foil": zFoil_new,
+                "z_opt":  zOpt,
                 "dTx_foil": dTx_foil,
-                "dTx_opt": dTx_opt,
+                "dTx_opt":  dTx_opt,
                 "gap": gap,
                 "stop_tol": stop_tol,
                 "mp_details": mp_out,
                 "sol_factual": solF,
-                "sol_foil": solFoil,
-                "sol_opt": solOpt,
+                "sol_foil": solFoil_new,
+                "sol_opt":  solOpt,
                 **best["params"],
             }
 
-        # cycle detection
+        # ── cycle detection ───────────────────────────────────────────────
         fp = _fingerprint(solOpt, decimals=3)
         seen[fp] = seen.get(fp, 0) + 1
         if seen[fp] >= 2:
@@ -1263,31 +1631,28 @@ def run_ncxplain_uc(
             return {
                 "status": "CYCLE_OR_NO_SOLUTION",
                 "iters": it,
-                "message": "SP repeated previously seen solution; likely cycling or explanation does not exist with chosen mutables/bounds.",
-                "best_gap": float(best["gap"]),
-                "best_iter": best["iter"],
+                "message": "SP repeated previously seen solution; likely cycling.",
+                "best_gap":    float(best["gap"]),
+                "best_iter":   best["iter"],
                 "best_params": best["params"],
                 "best_dTx_foil": best["dTx_foil"],
-                "best_dTx_opt": best["dTx_opt"],
-                "best_mp_details": best["mp_details"],
+                "best_dTx_opt":  best["dTx_opt"],
             }
 
-        # add cut
+        # ── add unconstrained SP solution as new cut ──────────────────────
         cuts.append(zOpt.copy())
 
-    # max iters
+    # ── max iters ─────────────────────────────────────────────────────────
     return {
         "status": "MAX_ITERS",
         "iters": max_iters,
-        "best_gap": float(best["gap"]),
-        "best_iter": best["iter"],
+        "best_gap":    float(best["gap"]),
+        "best_iter":   best["iter"],
         "best_params": best["params"],
         "best_dTx_foil": best["dTx_foil"],
-        "best_dTx_opt": best["dTx_opt"],
-        "best_mp_details": best["mp_details"],
-        "message": "No convergence within max_iters. Consider widening bounds or adding additional mutables.",
+        "best_dTx_opt":  best["dTx_opt"],
+        "message": "No convergence within max_iters.",
     }
-
 
 
 #=============================================================================
