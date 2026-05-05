@@ -51,6 +51,6 @@
   "best_v_plain": 411606.1944239526,
   "best_v_foil": 411606.1944239526,
   "best_inner_ub": 216736.33669083554,
-  "nodes_processed": 986,
-  "global_LB": 0.4507578005018147
+  "nodes_processed": 569,
+  "global_LB": 0.3712526606219323
 }
