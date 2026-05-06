@@ -160,6 +160,7 @@ class UCBranchAndSandwichWCE_4b:
         oub_grid_pts: int = 3,
         foil_violation_expr_fn: Optional[Callable] = None,
         lagrange_penalty: float = 500.0,
+        node_selection: str = "best_first",  # "best_first" or "fifo"
         checkpoint_path: Optional[str] = None,
         checkpoint_interval: int = 1,        # save every N nodes
         keepalive_interval: float = 1200.0,  # seconds between pings
@@ -194,6 +195,8 @@ class UCBranchAndSandwichWCE_4b:
 
         self.foil_violation_expr_fn = foil_violation_expr_fn
         self.lagrange_penalty = float(lagrange_penalty)
+
+        self.node_selection = node_selection
 
         # Checkpoint
         self.checkpoint_path = pathlib.Path(checkpoint_path) if checkpoint_path else None
@@ -785,22 +788,27 @@ class UCBranchAndSandwichWCE_4b:
                     certified = True
                     break
 
-                lb_key, _, _, node = heapq.heappop(heap)
+                if self.node_selection == "fifo":
+                    _, _, _, node = heap.pop(0)
+                else:
+                    _, _, _, node = heapq.heappop(heap)
                 open_node_lbs.pop(node.id, None)
                 nodes_processed += 1
 
-                # Prune by incumbent
-                if self.best_b is not None and lb_key >= self.best_F - self.eps_obj:
-                    continue
+                # ── Lazy init: solve OLB now, when node is actually selected ──────────
+                self._init_node(
+                    node, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
+                    warm_start_b=node.b_star_lb)  # b_star_lb is None for fresh children
 
-                # Clip stale Lagrangian LB computed before incumbent improved
-                node_lb = max(self.lb_box_L1(node.bL, node.bU), float(node.olb))
-                if self.best_b is not None and node_lb > self.best_F + self.eps_obj:
-                    if self.verbose:
-                        print(f"  [LB_CLIP] node={node.id} olb={node.olb:.4f} "
-                              f"clipped to bestF={self.best_F:.4f}")
-                    node.olb = self.best_F
-                    node_lb  = self.best_F
+                # Re-check after init: OLB may now be inf (infeasible) or exceed incumbent
+                if not np.isfinite(node.olb):
+                    continue
+                node_lb = max(self.lb_box_L1(node.bL, node.bU), node.olb)
+                open_node_lbs[node.id] = node_lb  # update with tighter value
+
+                # Prune by incumbent
+                if self.best_b is not None and node_lb >= self.best_F - self.eps_obj:
+                    continue
 
                 if self.verbose:
                     gLB = min(open_node_lbs.values()) if open_node_lbs else node_lb
@@ -824,18 +832,18 @@ class UCBranchAndSandwichWCE_4b:
                         any_oub_ok = True
                         self._update_incumbent(b, self.F(b), vp, vD, f"node={node.id:04d}")
 
-                if not any_oub_ok:
-                    node.oub_failures += 1
-                else:
-                    node.oub_failures = 0
+                #if not any_oub_ok:
+                #    node.oub_failures += 1
+                #else:
+                #    node.oub_failures = 0
 
                 # Structural fathom
-                if (node.oub_failures >= 2
-                        and node_lb <= self.eps_obj
-                        and node.inner_lb >= self.best_F - self.eps_obj):
-                    if self.verbose:
-                        print(f"  [FATHOM-STRUCT] node={node.id:04d}")
-                    continue
+                #if (node.oub_failures >= 2
+                #        and node_lb <= self.eps_obj
+                #        and node.inner_lb >= self.best_F - self.eps_obj):
+                #    if self.verbose:
+                #        print(f"  [FATHOM-STRUCT] node={node.id:04d}")
+                #    continue
 
                 # Branch and initialise children
                 n1, n2 = self._branch(node)
@@ -843,14 +851,7 @@ class UCBranchAndSandwichWCE_4b:
                     continue
 
                 for child in (n1, n2):
-                    self._init_node(
-                        child, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
-                        warm_start_b=node.b_star_lb)
-                    if not np.isfinite(child.olb):
-                        continue
-                    child_lb = max(self.lb_box_L1(child.bL, child.bU), child.olb)
-                    if self.best_b is not None:
-                        child_lb = min(child_lb, self.best_F)
+                    child_lb = max(self.lb_box_L1(child.bL, child.bU), 0.0)
                     if self.best_b is not None and child_lb >= self.best_F - self.eps_obj:
                         continue
                     heapq.heappush(heap, (child_lb, tie, child.id, child))
