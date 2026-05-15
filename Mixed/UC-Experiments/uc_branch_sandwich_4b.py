@@ -100,6 +100,7 @@ class BSNode4b:
     oub_failures: int = 0
     parent_inner_ub: float = np.inf
     status: str = "open"
+    initialized: bool = False
 
 
 # ============================================================
@@ -135,6 +136,10 @@ class UCBranchAndSandwichWCE_4b:
           Cost-threshold foils:                       50–200
           Ramp/uptime foils:                         200–500
           If Gurobi warns about numerics → halve. If [LAG_OLB]+X ~ 0 → double.
+      lp_relax : bool
+          If True, lower-bound master models relax u/v/w to continuous [0,1].
+          If False, lower-bound master models keep u/v/w binary and use
+          Gurobi's MIP dual bound (ObjBound) as the certified node bound.
     """
 
     def __init__(
@@ -160,6 +165,7 @@ class UCBranchAndSandwichWCE_4b:
         oub_grid_pts: int = 3,
         foil_violation_expr_fn: Optional[Callable] = None,
         lagrange_penalty: float = 500.0,
+        lp_relax: bool = True,
         node_selection: str = "best_first",  # "best_first" or "fifo"
         checkpoint_path: Optional[str] = None,
         checkpoint_interval: int = 1,        # save every N nodes
@@ -195,12 +201,14 @@ class UCBranchAndSandwichWCE_4b:
 
         self.foil_violation_expr_fn = foil_violation_expr_fn
         self.lagrange_penalty = float(lagrange_penalty)
+        self.lp_relax = bool(lp_relax)
 
         self.node_selection = node_selection
 
         # Checkpoint
         self.checkpoint_path = pathlib.Path(checkpoint_path) if checkpoint_path else None
         self.checkpoint_interval = int(checkpoint_interval)
+        self._loaded_checkpoint_state = None
 
         # Keep-alive
         self._keepalive = _GurobiKeepAlive(interval=keepalive_interval)
@@ -219,6 +227,44 @@ class UCBranchAndSandwichWCE_4b:
         # Load checkpoint if it exists
         if self.checkpoint_path and self.checkpoint_path.exists():
             self._load_checkpoint()
+
+    # ------------------------------------------------------------------
+    # Lower-bound extraction helpers
+    # ------------------------------------------------------------------
+
+    def _minimization_lb_from_model(self, m: gp.Model, fallback_inf: float) -> float:
+        """
+        Return a valid lower bound for a minimization model.
+
+        For LP-relaxed masters, this keeps the previous behavior and uses
+        ObjVal after a feasible OPTIMAL/TIME_LIMIT solve. For integer
+        masters, ObjVal is only an incumbent upper bound, so we must use
+        Gurobi's ObjBound instead.
+        """
+        bad_statuses = {GRB.INFEASIBLE, GRB.INF_OR_UNBD, GRB.UNBOUNDED}
+        if m.Status in bad_statuses:
+            return fallback_inf
+
+        if self.lp_relax:
+            if m.SolCount == 0 or m.Status not in (GRB.OPTIMAL, GRB.TIME_LIMIT):
+                return fallback_inf
+            return float(m.ObjVal)
+
+        try:
+            bound = float(m.ObjBound)
+        except (AttributeError, gp.GurobiError):
+            return fallback_inf
+        return bound if np.isfinite(bound) else fallback_inf
+
+    def _extract_b_star_from_solution(self, m: gp.Model, bcap: Dict[int, gp.Var | float]) -> Optional[np.ndarray]:
+        """Extract b from a feasible master solution, if one exists."""
+        if m.SolCount == 0:
+            return None
+        b_star = self.b0.copy()
+        for ell in self.free:
+            cap = bcap[ell]
+            b_star[ell] = float(cap.X) if hasattr(cap, "X") else float(cap)
+        return b_star
 
     # ------------------------------------------------------------------
     # Objective and box LB
@@ -270,6 +316,7 @@ class UCBranchAndSandwichWCE_4b:
             b0=self.b0, node_bL=node.bL, node_bU=node.bU,
             b_free_idx=self.free, foil_extra_constr_fn=None,
             cost_ub=None, output_flag=self.output_flag, w=self.w,
+            lp_relax=self.lp_relax,
         )
         cost_expr = build_uc_operating_cost_expr_4b(var, self.idx, self.cvec)
         m.setObjective(cost_expr, GRB.MINIMIZE)
@@ -278,10 +325,8 @@ class UCBranchAndSandwichWCE_4b:
         m.Params.OutputFlag = self.output_flag
         from uc_pipeline import _optimize_with_retry
         _optimize_with_retry(m)
-        if m.SolCount == 0 or m.Status not in (GRB.OPTIMAL, GRB.TIME_LIMIT):
-            m.dispose()
-            return float("inf")
-        result = float(m.ObjVal)
+
+        result = self._minimization_lb_from_model(m, fallback_inf=float("inf"))
         m.dispose()
         return result
 
@@ -323,6 +368,7 @@ class UCBranchAndSandwichWCE_4b:
             b0=self.b0, node_bL=node.bL, node_bU=node.bU,
             b_free_idx=self.free, foil_extra_constr_fn=self.foil_extra,
             cost_ub=cost_ub, output_flag=self.output_flag, w=self.w,
+            lp_relax=self.lp_relax,
         )
 
         if self.master_time_limit is not None:
@@ -338,26 +384,24 @@ class UCBranchAndSandwichWCE_4b:
         from uc_pipeline import _optimize_with_retry
         _optimize_with_retry(m)
 
-        if m.SolCount == 0:
-            if m.Status == GRB.INFEASIBLE:
-                if self.verbose:
-                    print(f"  [LP_OLB] Infeasible node={node.id}")
-                try:
-                    m.computeIIS(); m.write("master_relax.ilp")
-                except gp.GurobiError:
-                    pass
-            m.dispose()
-            return float("inf"), None
-        if m.Status not in (GRB.OPTIMAL, GRB.TIME_LIMIT):
+        if m.Status == GRB.INFEASIBLE:
+            if self.verbose:
+                print(f"  [OLB] Infeasible node={node.id}")
+            try:
+                m.computeIIS(); m.write("master_relax.ilp")
+            except gp.GurobiError:
+                pass
             m.dispose()
             return float("inf"), None
 
-        b_star = self.b0.copy()
-        for ell in self.free:
-            b_star[ell] = float(bcap[ell].X)
-        result = float(m.ObjVal), b_star
+        result = self._minimization_lb_from_model(m, fallback_inf=float("inf"))
+        if not np.isfinite(result):
+            m.dispose()
+            return float("inf"), None
+
+        b_star = self._extract_b_star_from_solution(m, bcap)
         m.dispose()
-        return result
+        return result, b_star
 
     # ------------------------------------------------------------------
     # Lagrangian OLB: relaxed master WITHOUT hard foil, penalty term added.
@@ -388,6 +432,7 @@ class UCBranchAndSandwichWCE_4b:
             foil_extra_constr_fn=None,   # NO hard foil
             cost_ub=cost_ub,
             output_flag=self.output_flag, w=self.w,
+            lp_relax=self.lp_relax,
         )
 
         try:
@@ -407,6 +452,7 @@ class UCBranchAndSandwichWCE_4b:
         except Exception as e:
             if self.verbose:
                 print(f"  [LAG_OLB] foil_violation_expr_fn error: {e}")
+            m.dispose()
             return float("-inf")
 
         if self.master_time_limit is not None:
@@ -422,12 +468,17 @@ class UCBranchAndSandwichWCE_4b:
         from uc_pipeline import _optimize_with_retry
         _optimize_with_retry(m)
 
-        # Must be proven optimal — time-limit gives primal value, not a valid LB
-        if m.Status != GRB.OPTIMAL or m.SolCount == 0:
-            m.dispose()
-            return float("-inf")
+        # In LP mode, keep the original strict rule: accept only proven-optimal
+        # Lagrangian bounds. In MIP mode, a time-limited MIP still provides a
+        # valid minimization lower bound through ObjBound.
+        if self.lp_relax:
+            if m.Status != GRB.OPTIMAL or m.SolCount == 0:
+                m.dispose()
+                return float("-inf")
+            result = float(m.ObjVal)
+        else:
+            result = self._minimization_lb_from_model(m, fallback_inf=float("-inf"))
 
-        result = float(m.ObjVal)
         m.dispose()
         return result
 
@@ -684,6 +735,7 @@ class UCBranchAndSandwichWCE_4b:
             if self.verbose:
                 print(f"  [FATHOM-INNER] node={node.id} at init")
             node.olb = float("inf")
+            node.initialized = True
             return
 
         olb, b_star    = self._solve_olb_relax(
@@ -691,47 +743,182 @@ class UCBranchAndSandwichWCE_4b:
             warm_start_b=warm_start_b)
         node.olb       = olb
         node.b_star_lb = b_star
+        node.initialized = True
 
     # ------------------------------------------------------------------
     # Checkpoint save / load
     # ------------------------------------------------------------------
 
-    def _save_checkpoint(self, nodes_processed: int, global_LB: float) -> None:
+    def _checkpoint_signature(self) -> dict:
+        """Small compatibility signature to avoid resuming with another instance."""
+        return {
+            "version": 2,
+            "n_b": int(len(self.b0)),
+            "free": [int(i) for i in self.free],
+            "b0": np.asarray(self.b0, dtype=float).round(12).tolist(),
+            "bL0": np.asarray(self.bL0, dtype=float).round(12).tolist(),
+            "bU0": np.asarray(self.bU0, dtype=float).round(12).tolist(),
+            "w": np.asarray(self.w, dtype=float).round(12).tolist(),
+            "lp_relax": bool(self.lp_relax),
+            "eps_b": float(self.eps_b),
+            "eps_obj": float(self.eps_obj),
+            "eps_weak": float(self.eps_weak),
+            "node_selection": str(self.node_selection),
+        }
+
+    @staticmethod
+    def _arr_to_json(a):
+        return None if a is None else np.asarray(a, dtype=float).tolist()
+
+    @staticmethod
+    def _arr_from_json(a):
+        return None if a is None else np.array(a, dtype=float)
+
+    def _node_to_dict(self, node: BSNode4b) -> dict:
+        return {
+            "id": int(node.id),
+            "bL": self._arr_to_json(node.bL),
+            "bU": self._arr_to_json(node.bU),
+            "olb": float(node.olb),
+            "b_star_lb": self._arr_to_json(node.b_star_lb),
+            "inner_lb": float(node.inner_lb),
+            "inner_ub": float(node.inner_ub),
+            "oub_failures": int(node.oub_failures),
+            "parent_inner_ub": float(node.parent_inner_ub),
+            "status": str(node.status),
+            "initialized": bool(getattr(node, "initialized", False)),
+        }
+
+    def _node_from_dict(self, d: dict) -> BSNode4b:
+        return BSNode4b(
+            id=int(d["id"]),
+            bL=np.array(d["bL"], dtype=float),
+            bU=np.array(d["bU"], dtype=float),
+            olb=float(d.get("olb", float("inf"))),
+            b_star_lb=self._arr_from_json(d.get("b_star_lb")),
+            inner_lb=float(d.get("inner_lb", float("inf"))),
+            inner_ub=float(d.get("inner_ub", float("inf"))),
+            oub_failures=int(d.get("oub_failures", 0)),
+            parent_inner_ub=float(d.get("parent_inner_ub", float("inf"))),
+            status=str(d.get("status", "open")),
+            initialized=bool(d.get("initialized", False)),
+        )
+
+    def _state_is_compatible(self, state: dict) -> bool:
+        sig = state.get("signature")
+        if sig is None:
+            return False
+        cur = self._checkpoint_signature()
+        keys = ("version", "n_b", "free", "b0", "bL0", "bU0", "w", "lp_relax", "eps_b", "eps_obj", "eps_weak")
+        return all(sig.get(k) == cur.get(k) for k in keys)
+
+    def _save_checkpoint(
+        self,
+        nodes_processed: int,
+        global_LB: float,
+        heap: Optional[list] = None,
+        open_node_lbs: Optional[Dict[int, float]] = None,
+        tie: Optional[int] = None,
+        certified: bool = False,
+    ) -> None:
         if self.checkpoint_path is None:
             return
+
+        # Store both incumbent state and, when available, the actual search frontier.
+        heap_state = None
+        if heap is not None:
+            heap_state = [
+                {
+                    "priority": float(priority),
+                    "tie": int(tie_i),
+                    "node_id": int(node_id),
+                    "node": self._node_to_dict(node),
+                }
+                for (priority, tie_i, node_id, node) in heap
+            ]
+
         state = {
+            "checkpoint_type": "UCBranchAndSandwichWCE_4b_full_tree",
+            "signature": self._checkpoint_signature(),
             "best_F":        self.best_F,
             "best_b":        self.best_b.tolist() if self.best_b is not None else None,
             "best_v_plain":  self.best_v_plain,
             "best_v_foil":   self.best_v_foil,
             "best_inner_ub": self.best_inner_ub,
-            "nodes_processed": nodes_processed,
-            "global_LB":     global_LB,
+            "node_id_counter": int(self._node_id),
+            "nodes_processed": int(nodes_processed),
+            "global_LB":     float(global_LB),
+            "certified":     bool(certified),
+            "tie":           int(tie) if tie is not None else None,
+            "open_node_lbs":  {str(k): float(v) for k, v in (open_node_lbs or {}).items()},
+            "heap":          heap_state,
         }
         tmp = self.checkpoint_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2))
         tmp.replace(self.checkpoint_path)  # atomic on POSIX
         if self.verbose:
+            n_open = len(heap) if heap is not None else 0
             print(f"  [CKPT] saved → {self.checkpoint_path}  "
-                  f"nodes={nodes_processed}  bestF={self.best_F:.4f}  "
-                  f"gLB={global_LB:.4f}")
+                  f"nodes={nodes_processed}  open={n_open}  "
+                  f"bestF={self.best_F:.4f}  gLB={global_LB:.4f}")
 
     def _load_checkpoint(self) -> None:
         try:
             state = json.loads(self.checkpoint_path.read_text())
-            self.best_F        = float(state["best_F"])
-            self.best_b        = np.array(state["best_b"], dtype=float) if state["best_b"] is not None else None
+
+            # Always recover incumbent fields when present; old checkpoints remain usable
+            # as incumbent warm starts even if they do not contain the tree frontier.
+            if "best_F" in state:
+                self.best_F = float(state["best_F"])
+            self.best_b        = np.array(state["best_b"], dtype=float) if state.get("best_b") is not None else None
             self.best_v_plain  = state.get("best_v_plain")
             self.best_v_foil   = state.get("best_v_foil")
             self.best_inner_ub = float(state.get("best_inner_ub", float("inf")))
+            self._node_id      = int(state.get("node_id_counter", self._node_id))
+
+            has_full_tree = bool(state.get("heap")) and bool(state.get("open_node_lbs"))
+            if has_full_tree and self._state_is_compatible(state):
+                self._loaded_checkpoint_state = state
+                mode = "full tree"
+            elif has_full_tree:
+                self._loaded_checkpoint_state = None
+                mode = "incumbent only; tree incompatible"
+            else:
+                self._loaded_checkpoint_state = None
+                mode = "incumbent only"
+
             if self.verbose:
-                print(f"[CKPT] Resumed from {self.checkpoint_path}  "
+                print(f"[CKPT] Loaded {mode} from {self.checkpoint_path}  "
                       f"bestF={self.best_F:.4f}  "
                       f"nodes_prev={state.get('nodes_processed', '?')}  "
                       f"gLB={state.get('global_LB', float('nan')):.4f}")
         except Exception as e:
+            self._loaded_checkpoint_state = None
             if self.verbose:
                 print(f"[CKPT] Could not load checkpoint ({e}) — starting fresh")
+
+    def _restore_frontier_from_checkpoint(self):
+        """Return (heap, tie, open_node_lbs, nodes_processed, certified) or None."""
+        state = self._loaded_checkpoint_state
+        if state is None:
+            return None
+
+        heap = []
+        open_node_lbs = {int(k): float(v) for k, v in state.get("open_node_lbs", {}).items()}
+        for item in state.get("heap", []):
+            node = self._node_from_dict(item["node"])
+            priority = float(item["priority"])
+            tie_i = int(item["tie"])
+            node_id = int(item.get("node_id", node.id))
+            heap.append((priority, tie_i, node_id, node))
+        if self.node_selection != "fifo":
+            heapq.heapify(heap)
+
+        tie = int(state.get("tie") if state.get("tie") is not None else (max([h[1] for h in heap], default=-1) + 1))
+        self._node_id = int(state.get("node_id_counter", self._node_id))
+        nodes_processed = int(state.get("nodes_processed", 0))
+        certified = bool(state.get("certified", False))
+        return heap, tie, open_node_lbs, nodes_processed, certified
 
     # ------------------------------------------------------------------
     # Main loop
@@ -744,40 +931,53 @@ class UCBranchAndSandwichWCE_4b:
         compute_final_mip_lb: bool = False,
         mip_lb_time_limit: float = 900.0,
     ):
-        self._node_id = 0
-        root = BSNode4b(id=0, bL=self.bL0.copy(), bU=self.bU0.copy())
+        restored = self._restore_frontier_from_checkpoint()
 
-        heap: list = []
-        tie = 0
-        open_node_lbs: Dict[int, float] = {}
+        if restored is not None:
+            heap, tie, open_node_lbs, nodes_processed, certified = restored
+            if self.verbose:
+                gLB0 = min(open_node_lbs.values()) if open_node_lbs else float("inf")
+                if self.best_b is not None:
+                    gLB0 = min(gLB0, self.best_F)
+                print(f"[CKPT] Resuming full tree: open={len(heap)}  "
+                      f"nodes_prev={nodes_processed}  gLB={gLB0:.4f}")
+        else:
+            self._node_id = 0
+            root = BSNode4b(id=0, bL=self.bL0.copy(), bU=self.bU0.copy())
+
+            heap: list = []
+            tie = 0
+            open_node_lbs: Dict[int, float] = {}
+            nodes_processed = 0
+            certified = False
 
         # Start keep-alive thread
         self._keepalive.start()
 
-        # Warm-start incumbents
-        ok0, vp0, vD0 = self.weak_ok(self.b0)
-        if ok0:
-            self._update_incumbent(self.b0, self.F(self.b0), vp0, vD0, "b0")
-        b_max = self.b0.copy(); b_max[self.free] = self.bU0[self.free]
-        okm, vpm, vDm = self.weak_ok(b_max)
-        if okm:
-            self._update_incumbent(b_max, self.F(b_max), vpm, vDm, "b_max")
-
-        # Initialise root
-        self._init_node(root, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t)
-        if np.isfinite(root.olb):
-            root_lb = max(self.lb_box_L1(root.bL, root.bU), root.olb)
-            heapq.heappush(heap, (root_lb, tie, root.id, root))
-            open_node_lbs[root.id] = root_lb
-            tie += 1
-
-        nodes_processed = 0
-        certified = False
-
         try:
+            # Warm-start incumbents only for a fresh tree. A full checkpoint already
+            # contains the incumbent and frontier state from the previous run.
+            if restored is None:
+                ok0, vp0, vD0 = self.weak_ok(self.b0)
+                if ok0:
+                    self._update_incumbent(self.b0, self.F(self.b0), vp0, vD0, "b0")
+                b_max = self.b0.copy(); b_max[self.free] = self.bU0[self.free]
+                okm, vpm, vDm = self.weak_ok(b_max)
+                if okm:
+                    self._update_incumbent(b_max, self.F(b_max), vpm, vDm, "b_max")
+
+                # Initialise root eagerly, so all nodes in open_node_lbs represent
+                # actual solved node lower bounds rather than placeholder box bounds.
+                self._init_node(root, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t)
+                if np.isfinite(root.olb):
+                    root_lb = max(self.lb_box_L1(root.bL, root.bU), root.olb)
+                    heapq.heappush(heap, (root_lb, tie, root.id, root))
+                    open_node_lbs[root.id] = root_lb
+                    tie += 1
+
             while heap and nodes_processed < self.max_nodes:
 
-                # Global LB: min over open nodes, clipped to never exceed best_F
+                # Global LB: min over open leaf nodes only, clipped to never exceed best_F.
                 global_LB = min(open_node_lbs.values()) if open_node_lbs else float("inf")
                 if self.best_b is not None:
                     global_LB = min(global_LB, self.best_F)
@@ -795,28 +995,31 @@ class UCBranchAndSandwichWCE_4b:
                 open_node_lbs.pop(node.id, None)
                 nodes_processed += 1
 
-                # ── Lazy init: solve OLB now, when node is actually selected ──────────
-                self._init_node(
-                    node, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
-                    warm_start_b=node.b_star_lb)  # b_star_lb is None for fresh children
+                # Nodes are now normally initialized before being pushed. Keep this
+                # fallback for backward compatibility with old/partial checkpoints.
+                if not getattr(node, "initialized", False):
+                    self._init_node(
+                        node, window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
+                        warm_start_b=node.b_star_lb)
 
-                # Re-check after init: OLB may now be inf (infeasible) or exceed incumbent
+                # Re-check after init: OLB may be inf (infeasible) or exceed incumbent.
                 if not np.isfinite(node.olb):
                     continue
                 node_lb = max(self.lb_box_L1(node.bL, node.bU), node.olb)
-                open_node_lbs[node.id] = node_lb  # update with tighter value
 
-                # Prune by incumbent
+                # Prune by incumbent. Do NOT put the popped node back into
+                # open_node_lbs; once selected, it is no longer an open leaf.
                 if self.best_b is not None and node_lb >= self.best_F - self.eps_obj:
                     continue
 
                 if self.verbose:
-                    gLB = min(open_node_lbs.values()) if open_node_lbs else node_lb
-                    gLB = min(gLB, self.best_F) if self.best_b is not None else gLB
-                    gap_pct = (self.best_F - gLB) / max(abs(self.best_F), 1e-9) * 100
+                    display_LB = min(open_node_lbs.values()) if open_node_lbs else node_lb
+                    display_LB = min(display_LB, node_lb)
+                    display_LB = min(display_LB, self.best_F) if self.best_b is not None else display_LB
+                    gap_pct = (self.best_F - display_LB) / max(abs(self.best_F), 1e-9) * 100
                     print(f"[BS] node={node.id:04d} olb={node.olb:.4f} "
                           f"inner=[{node.inner_lb:.2f},{node.inner_ub:.2f}] "
-                          f"bestF={self.best_F:.4f} gLB={gLB:.4f} gap={gap_pct:.1f}%")
+                          f"bestF={self.best_F:.4f} gLB={display_LB:.4f} gap={gap_pct:.1f}%")
 
                 # Inner fathoming (re-checked with latest best_inner_ub)
                 if node.inner_lb > self.best_inner_ub + self.eps_obj:
@@ -832,39 +1035,52 @@ class UCBranchAndSandwichWCE_4b:
                         any_oub_ok = True
                         self._update_incumbent(b, self.F(b), vp, vD, f"node={node.id:04d}")
 
-                #if not any_oub_ok:
-                #    node.oub_failures += 1
-                #else:
-                #    node.oub_failures = 0
-
-                # Structural fathom
-                #if (node.oub_failures >= 2
-                #        and node_lb <= self.eps_obj
-                #        and node.inner_lb >= self.best_F - self.eps_obj):
-                #    if self.verbose:
-                #        print(f"  [FATHOM-STRUCT] node={node.id:04d}")
-                #    continue
-
-                # Branch and initialise children
+                # Branch and initialise children eagerly. This prevents zero-valued
+                # placeholder bounds from dominating global_LB.
                 n1, n2 = self._branch(node)
                 if n1 is None:
                     continue
 
                 for child in (n1, n2):
-                    child_lb = max(self.lb_box_L1(child.bL, child.bU), 0.0)
+                    rough_child_lb = max(self.lb_box_L1(child.bL, child.bU), 0.0)
+                    if self.best_b is not None and rough_child_lb >= self.best_F - self.eps_obj:
+                        continue
+
+                    self._init_node(
+                        child,
+                        window_size,
+                        per_bus_neutrality,
+                        u_init,
+                        p_init,
+                        on_t,
+                        off_t,
+                        warm_start_b=node.b_star_lb,
+                    )
+                    if not np.isfinite(child.olb):
+                        continue
+
+                    child_lb = max(self.lb_box_L1(child.bL, child.bU), child.olb)
                     if self.best_b is not None and child_lb >= self.best_F - self.eps_obj:
                         continue
+
                     heapq.heappush(heap, (child_lb, tie, child.id, child))
                     open_node_lbs[child.id] = child_lb
                     tie += 1
 
-                # Periodic checkpoint
+                # Periodic checkpoint: save incumbent plus the actual open frontier.
                 if (self.checkpoint_path is not None
                         and nodes_processed % self.checkpoint_interval == 0):
                     gLB_ckpt = min(open_node_lbs.values()) if open_node_lbs else self.best_F
                     if self.best_b is not None:
                         gLB_ckpt = min(gLB_ckpt, self.best_F)
-                    self._save_checkpoint(nodes_processed, gLB_ckpt)
+                    self._save_checkpoint(
+                        nodes_processed,
+                        gLB_ckpt,
+                        heap=heap,
+                        open_node_lbs=open_node_lbs,
+                        tie=tie,
+                        certified=certified,
+                    )
 
         finally:
             self._keepalive.stop()
@@ -882,7 +1098,7 @@ class UCBranchAndSandwichWCE_4b:
         if compute_final_mip_lb and node_budget_exhausted and self.best_b is not None:
             if self.verbose:
                 print(f"\n[B&S] Node budget exhausted ({nodes_processed} nodes). "
-                      f"LP gap = {(self.best_F - global_LB)/max(abs(self.best_F),1e-9)*100:.1f}%. "
+                      f"current gap = {(self.best_F - global_LB)/max(abs(self.best_F),1e-9)*100:.1f}%. "
                       f"Computing MIP lower bound ...")
             mip_lb = self.compute_mip_lower_bound(
                 window_size, per_bus_neutrality, u_init, p_init, on_t, off_t,
@@ -896,7 +1112,7 @@ class UCBranchAndSandwichWCE_4b:
                 mip_lb_used = True
             else:
                 if self.verbose:
-                    print(f"  [MIP_LB] No improvement over LP LB "
+                    print(f"  [MIP_LB] No improvement over current LB "
                           f"({mip_lb:.4f} <= {global_LB:.4f})")
 
         gap = ((self.best_F - global_LB)
@@ -904,7 +1120,14 @@ class UCBranchAndSandwichWCE_4b:
                else float("inf"))
 
         # Final checkpoint
-        self._save_checkpoint(nodes_processed, global_LB)
+        self._save_checkpoint(
+            nodes_processed,
+            global_LB,
+            heap=heap,
+            open_node_lbs=open_node_lbs,
+            tie=tie,
+            certified=certified,
+        )
 
         return {
             "success":        self.best_b is not None,
@@ -918,6 +1141,7 @@ class UCBranchAndSandwichWCE_4b:
             "best_inner_ub":  self.best_inner_ub,
             "certified":      certified,
             "mip_lb_used":    mip_lb_used,
+            "lp_relax":       self.lp_relax,
         }
 
     # ------------------------------------------------------------------
