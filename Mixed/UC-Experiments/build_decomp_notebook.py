@@ -742,6 +742,69 @@ cells.append(decomp_cell("57", big_M_mult=1.0, time_limit=900,
 cells.append(md("**Step 3/3** — Plot result"))
 cells.append(plot_decomp_cell("57"))
 
+# ── Section 4c · LB-stagnation Fix 1 (hybrid bigM + indicator) ────────────────
+cells.append(md(
+    "---\n## Section 4c · Fix 1: `comp_mode=\"hybrid\"` (LB-stagnation experiment)\n\n"
+    "Same B&S warm-start pipeline as 4b, but with `comp_mode=\"hybrid\"`: bigM is "
+    "kept only for free-line flow-limit complementarity pairs (whose slack "
+    "`b[ell] ± f^j` involves a master decision variable), and **all other** "
+    "complementarity pairs (gen bounds, ramps, shed, curt, shift) are encoded "
+    "as Gurobi indicator constraints.  Indicators are enforced by B&B branching "
+    "and **do not** linearise to a loose big-M in the LP relaxation, so each "
+    "new KKT block actually tightens `ObjBound` instead of being absorbed by "
+    "fractional `z`s.  See `DECOMP_lb_stagnation.md` Fix 1.\n\n"
+    "Per-iteration `[LB diag]` lines (always printed in verbose mode) report "
+    "`ObjBound` (CCG lower bound), `ObjVal` (incumbent upper bound), `MIPGap`, "
+    "and the freshly solved Root LP value from `m.relax()`.  Compare against "
+    "4b: in bigM mode `ObjBound ≈ Root LP ≈ constant` across iterations; with "
+    "hybrid we expect `ObjBound` to grow each iteration.\n\n"
+    "Results are stored in `res_14_hybrid`, `res_39_hybrid`, `res_57_hybrid` "
+    "(distinct from the bigM `res_<g>` baselines)."
+))
+
+# IEEE 14 hybrid
+cells.append(md("### 4c.1 · IEEE 14-bus — hybrid"))
+cells.append(decomp_cell("14", big_M_mult=1.0, time_limit=900,
+                          master_out=1, max_iter=15, suffix="_hybrid",
+                          comp_mode="hybrid"))
+
+# IEEE 39 hybrid
+cells.append(md("### 4c.2 · IEEE 39-bus — hybrid"))
+cells.append(decomp_cell("39", big_M_mult=1.0, time_limit=900,
+                          master_out=1, max_iter=15, suffix="_hybrid",
+                          comp_mode="hybrid"))
+
+# IEEE 57 hybrid
+cells.append(md("### 4c.3 · IEEE 57-bus — hybrid"))
+cells.append(decomp_cell("57", big_M_mult=1.0, time_limit=900,
+                          master_out=1, max_iter=15, suffix="_hybrid",
+                          comp_mode="hybrid"))
+
+# Side-by-side bigM vs hybrid summary
+cells.append(md(
+    "### 4c.4 · Comparison summary (bigM vs hybrid)\n"
+    "Side-by-side per-grid comparison of certified gap and final LB.  "
+    "Hybrid should show strictly higher (or equal) `master_LB` and smaller `gap_pct`."
+))
+cells.append(code(
+    "def _fmt(r):\n"
+    "    if r is None or not r.get('success'):\n"
+    "        return f\"{'N/A':>10} {'N/A':>10} {'N/A':>8}\"\n"
+    "    return (f\"{r['F_opt']:>10.4f} {r['master_LB']:>10.4f} \"\n"
+    "            f\"{r['gap_pct']:>7.2f}%\")\n"
+    "\n"
+    "print(f\"{'':<14} | {'=== bigM ===':^29} | {'=== hybrid ===':^29}\")\n"
+    "print(f\"{'Grid':<14} | {'F_opt':>10} {'LB':>10} {'gap%':>8} | \"\n"
+    "      f\"{'F_opt':>10} {'LB':>10} {'gap%':>8}\")\n"
+    "print('-' * 78)\n"
+    "for label, r_bm, r_hy in [\n"
+    "    ('IEEE 14-bus', globals().get('res_14'), globals().get('res_14_hybrid')),\n"
+    "    ('IEEE 39-bus', globals().get('res_39'), globals().get('res_39_hybrid')),\n"
+    "    ('IEEE 57-bus', globals().get('res_57'), globals().get('res_57_hybrid')),\n"
+    "]:\n"
+    "    print(f'{label:<14} | {_fmt(r_bm)} | {_fmt(r_hy)}')\n"
+))
+
 # Results header
 cells.append(md("---\n## Section 5 · Results summary"))
 

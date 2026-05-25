@@ -112,8 +112,11 @@ class UCDecomp4b:
         self.master_time_limit  = float(master_time_limit) if master_time_limit is not None else None
         self.master_output_flag = int(master_output_flag)
         self.master_mip_gap     = float(master_mip_gap)
-        if comp_mode not in ("bigM", "indicator", "sos1"):
-            raise ValueError(f"comp_mode must be 'bigM', 'indicator', or 'sos1'; got {comp_mode!r}")
+        if comp_mode not in ("bigM", "indicator", "sos1", "hybrid"):
+            raise ValueError(
+                f"comp_mode must be 'bigM', 'indicator', 'sos1', or 'hybrid'; "
+                f"got {comp_mode!r}"
+            )
         self.comp_mode = comp_mode
 
         self.eps_weak = float(eps_weak)
@@ -694,31 +697,46 @@ class UCDecomp4b:
         # ---- Complementarity ----
         # M_d, M_s are ignored for indicator/sos1 modes (kept in signature for
         # uniform call sites so nothing else changes).
-        # z's are named deterministically (zbm{s}_{tag}) so analytic_warm_start
-        # can look them up by name across temp/main models.
-        def _comp(dual_var, slack_expr, M_d, M_s, tag: str):
+        # z's are always named zbm{s}_{tag} (regardless of mode) so
+        # _analytic_warm_start.set_z can look them up by name uniformly.
+        # z-convention is unified across bigM/indicator: z=1 → dual=0
+        # (constraint slack), z=0 → slack=0 (constraint binding).
+        def _comp(dual_var, slack_expr, M_d, M_s, tag: str,
+                  is_bilinear: bool = False):
             """Enforce dual ⟂ slack (at most one nonzero).  `tag` is a unique
             string per call (per pattern j) used to name the z variable.
 
             bigM     : dual ≤ M_d*(1-z),  slack ≤ M_s*z            [binary]
-            indicator: z=0 → dual=0,       z=1 → slack=0            [binary, M-free]
+            indicator: z=1 → dual=0,       z=0 → slack=0            [binary, M-free]
             sos1     : SOS1({dual, slack})                           [no binary, M-free]
+            hybrid   : bigM if is_bilinear else indicator
+                       — use for pairs where `slack_expr` contains a master
+                       decision variable (the flow-limit slack `b[ell]±f^j`),
+                       which forces a big-M encoding.  All other pairs have
+                       constant RHS and can use indicators, which Gurobi
+                       enforces via B&B branching (NOT linearised internally
+                       with big-M), so they don't loosen the LP relaxation.
+                       See DECOMP_lb_stagnation.md Fix 1.
             """
             mode = self.comp_mode
+            if mode == "hybrid":
+                mode = "bigM" if is_bilinear else "indicator"
+
             if mode == "bigM":
                 z = m.addVar(vtype=GRB.BINARY, name=f"zbm{s}_{tag}")
                 m.addConstr(dual_var <= M_d * (1 - z))
                 m.addConstr(slack_expr <= M_s * z)
 
             elif mode == "indicator":
-                z = m.addVar(vtype=GRB.BINARY, name=f"zind{s}_{tag}")
-                m.addGenConstrIndicator(z, False, dual_var, GRB.LESS_EQUAL, 0.0)
+                z = m.addVar(vtype=GRB.BINARY, name=f"zbm{s}_{tag}")
+                # Match bigM convention: z=1 → dual=0, z=0 → slack=0
+                m.addGenConstrIndicator(z, True, dual_var, GRB.LESS_EQUAL, 0.0)
                 if isinstance(slack_expr, gp.Var):
-                    m.addGenConstrIndicator(z, True, slack_expr, GRB.LESS_EQUAL, 0.0)
+                    m.addGenConstrIndicator(z, False, slack_expr, GRB.LESS_EQUAL, 0.0)
                 else:
                     s_aux = m.addVar(lb=-GRB.INFINITY, name=f"saux_ind{s}_{tag}")
                     m.addConstr(s_aux == slack_expr)
-                    m.addGenConstrIndicator(z, True, s_aux, GRB.LESS_EQUAL, 0.0)
+                    m.addGenConstrIndicator(z, False, s_aux, GRB.LESS_EQUAL, 0.0)
 
             elif mode == "sos1":
                 if isinstance(slack_expr, gp.Var):
@@ -730,17 +748,25 @@ class UCDecomp4b:
                     m.addSOS(GRB.SOS_TYPE1, [dual_var, s_aux])
                     master_vars["sos_pairs"].append((dual_var, s_aux))
 
-        # Flow limits
+        # Flow limits.
+        # is_bilinear=True ONLY for free lines, where `cap = b_vars[ell]`
+        # makes the slack `cap ± f_j` depend on a master decision variable.
+        # In hybrid mode this routes free-line flow pairs to bigM (required)
+        # and fixed-line flow pairs to indicators (constant RHS, no LP loosening).
         for ell in range(nL):
             for t in range(T):
                 if ell in free_set:
                     cap = b_vars[ell]
                     M_s = 2.0 * float(bU[ell])
+                    is_bln = True
                 else:
                     cap = float(b0[ell])
                     M_s = 2.0 * cap if cap > 0 else 1.0
-                _comp(mu_p[ell, t], cap - f_j[ell, t],  M_mu, M_s, tag=f"mup_{ell}_{t}")
-                _comp(mu_m[ell, t], cap + f_j[ell, t],  M_mu, M_s, tag=f"mum_{ell}_{t}")
+                    is_bln = False
+                _comp(mu_p[ell, t], cap - f_j[ell, t],  M_mu, M_s,
+                      tag=f"mup_{ell}_{t}", is_bilinear=is_bln)
+                _comp(mu_m[ell, t], cap + f_j[ell, t],  M_mu, M_s,
+                      tag=f"mum_{ell}_{t}", is_bilinear=is_bln)
 
         # Generator bounds
         for g, gen in enumerate(data.gens):
@@ -1822,6 +1848,34 @@ class UCDecomp4b:
                         print(f"  [DECOMP] Master status={m.Status}, stopping.")
                     termination_reason = f"master_status_{m.Status}"
                     break
+
+                # --- LB stagnation diagnostic (DECOMP_lb_stagnation.md §4) -----
+                # ObjBound is the formal CCG lower bound; ObjVal is the
+                # incumbent upper bound on the master MIP.  Solving the LP
+                # relaxation explicitly isolates the root-LP contribution to
+                # ObjBound — if ObjBound ≈ Root LP across iterations while
+                # new KKT blocks are being added, the LP is being absorbed by
+                # fractional z's (bigM looseness) instead of tightening.
+                if self.verbose:
+                    try:
+                        ob = float(m.ObjBound)
+                        ov = float(m.ObjVal) if m.SolCount > 0 else float("nan")
+                        mg = float(m.MIPGap) if m.SolCount > 0 else float("nan")
+                        print(f"  [LB diag] ObjBound (LP-LB):   {ob:.6f}")
+                        print(f"  [LB diag] ObjVal   (int-UB):  {ov:.6f}   "
+                              f"gap={100*mg:.2f}%")
+                        _lp_diag = m.relax()
+                        _lp_diag.Params.OutputFlag = 0
+                        _lp_diag.Params.TimeLimit  = 60.0
+                        _lp_diag.optimize()
+                        if _lp_diag.Status in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+                            print(f"  [LB diag] Root LP  (relaxed): {_lp_diag.ObjVal:.6f}")
+                        else:
+                            print(f"  [LB diag] Root LP  (relaxed): status={_lp_diag.Status}")
+                        _lp_diag.dispose()
+                    except Exception as _e:
+                        print(f"  [LB diag] failed: {_e}")
+                # ---------------------------------------------------------------
 
                 # Use ObjBound as LB (tighter than ObjVal when time limit hit)
                 try:

@@ -56,7 +56,7 @@ def __init__(
     master_time_limit: Optional[float] = None,
     master_output_flag: int = 0,
     master_mip_gap: float = 1e-4,
-    comp_mode: str = "sos1",   # "bigM" | "indicator" | "sos1"
+    comp_mode: str = "sos1",   # "bigM" | "indicator" | "sos1" | "hybrid"
     b_hat_hint: Optional[np.ndarray] = None,  # known-good CE from B&S
 )
 ```
@@ -72,8 +72,9 @@ def __init__(
 
 ### comp_mode implementations
 - `"bigM"`: `dual ≤ M_d*(1-z)`, `slack ≤ M_s*z` — binary per pair, LP bound stays meaningful ← **current production mode**
-- `"indicator"`: `z=0 → dual=0`, `z=1 → slack=0` — binary per pair, M-free
+- `"indicator"`: `z=1 → dual=0`, `z=0 → slack=0` — binary per pair, M-free, enforced via B&B branching (does NOT loosen LP). Same z-convention as `"bigM"` so `_analytic_warm_start` works for either mode.
 - `"sos1"`: `SOS1({dual, slack})` — no binary, no M ← **DOES NOT WORK** (see Bug 5)
+- `"hybrid"`: bigM for pairs with bilinear slack (free-line flow limits, where `slack = b[ell] ± f^j` involves master variable `b[ell]`); indicator for everything else (constant-RHS pairs). See `DECOMP_lb_stagnation.md` — addresses CCG LB stagnation by tightening the LP relaxation on non-bilinear KKT pairs.
 
 ### run() flow (current)
 ```
@@ -232,6 +233,12 @@ Architectural changes added to `uc_decomp_4b.py` to address this:
 Plus 4b.1b: cold-start ablation (no warm-start, no F upper bound, no analytic warm-start) demonstrating the structural requirement.
 
 ### Future work (parked, not yet implemented)
+
+**LB stagnation — Fix 1 IMPLEMENTED 2026-05-25**: `comp_mode="hybrid"` added to `uc_decomp_4b.py`. Routes constant-RHS complementarity pairs (gen bounds, ramps, shed, curt, shift) through `addGenConstrIndicator` while keeping bigM for free-line flow pairs (where `slack = b[ell] ± f^j` is bilinear). Indicator pairs are enforced by B&B branching, NOT linearised via big-M, so they don't loosen the LP relaxation. Also added per-iteration LB diagnostic in `run()` (verbose only): prints `ObjBound`, `ObjVal`, `MIPGap`, and a freshly solved `m.relax()` Root LP value so it's easy to see whether the LP bound is tracking new KKT blocks or stagnating at the root. **Next: validate on IEEE 14 by re-running 4b.1 with `comp_mode="hybrid"`** and confirming `ObjBound` grows across iterations.
+
+**LB stagnation — Fix 2 (parked)**: McCormick linearisation of `w = b[ell] · μ_p^j[ell,t]` + strong-duality equality replacing the flow z-binaries (~100–150 lines). Pursue if Fix 1 doesn't close the gap on IEEE 14.
+
+**LB stagnation — Fix 3 (parked)**: Yue et al. §4.2 projection reformulation (P4). Major rewrite. Only if Fix 2 isn't enough on IEEE 39/57.
 
 **DECOMP+cut** (Fritz & Bukhsh 2025 §C, "Data-Driven Heuristic Cuts"):
 - Mine `oracle.cache_plain` for (g,t) pairs where `u_plain[g,t]` is constant across all cached samples → fix `u_foil[g,t]` accordingly in the master

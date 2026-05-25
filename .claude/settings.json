@@ -37,7 +37,10 @@
       "Bash(PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -u repro_warmstart.py --solve-iter2 5)",
       "Bash(PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -u repro_warmstart.py --solve-iter2 60)",
       "Bash(/c/Users/tomas/miniconda3/envs/ce-env/python.exe build_decomp_notebook.py)",
-      "Bash(PYTHONIOENCODING=utf-8 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -c ' *)"
+      "Bash(PYTHONIOENCODING=utf-8 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -c ' *)",
+      "Bash(python -m py_compile \"Mixed/UC-Experiments/uc_decomp_4b.py\")",
+      "Bash(python build_decomp_notebook.py)",
+      "Bash(python -c ' *)"
     ],
     "additionalDirectories": [
       "c:\\Users\\tomas\\.claude\\projects\\c--Users-tomas-Documents-GitHub-Counterfactual-Explanations-for-optimization-problems\\memory"
