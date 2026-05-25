@@ -1,0 +1,40 @@
+\ Model network_uc_copy
+\ LP format - for model browsing. Use MPS format to capture full model detail.
+\ Signature: 0xbe45cdddebc3f012
+Minimize
+ 
+Subject To
+ fix_b[45]: b[45] = 192
+ R13616: sp_0[19,19] <= 0
+ R14624: sp_0[33,19] <= 0
+ R18336: - b[45] - f_0[45,19] <= 0
+ R18848: - f_0[39,19] + f_0[45,19] + shed_0[19,19] - curt_0[2,19]
+   - sp_0[19,19] + sm_0[19,19] = -199.2036615384616
+ R19184: p_0[4,19] + f_0[39,19] + shed_0[33,19] - sp_0[33,19] + sm_0[33,19]
+   = 0
+ R20504: - pi_0[19,19] + pi_0[33,19] + nu_0[39,19] + mup_0[39,19]
+   - mum_0[39,19] = 0
+ R21464: 55.555556 nu_0[39,19] = 0
+ R22400: pi_0[33,19] + gsh_ub_0[33,19] - gsh_lb_0[33,19] = -20000
+ R22592: - pi_0[19,19] + gcu_ub_0[2,19] - gcu_lb_0[2,19] = -5
+ R28313: mup_0[39,19] + 20000 C24107 <= 20000
+ R28314: - f_0[39,19] - 384 C24107 <= -192
+ R34075: gsh_lb_0[33,19] + 20000 C26988 <= 20000
+ R34843: gcu_lb_0[2,19] + 20000 C27372 <= 20000
+ R34844: curt_0[2,19] - 462.5384615384615 C27372 <= 0
+Bounds
+ b[45] free
+ f_0[39,19] free
+ f_0[45,19] free
+ curt_0[2,19] free
+ sp_0[19,19] free
+ sp_0[33,19] free
+ pi_0[19,19] free
+ pi_0[33,19] free
+ nu_0[39,19] free
+ mup_0[39,19] free
+ gsh_lb_0[33,19] free
+ gcu_lb_0[2,19] free
+Binaries
+ C24107 C26988 C27372
+End

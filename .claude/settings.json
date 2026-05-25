@@ -1,0 +1,46 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python cache_setup.py)",
+      "Bash(where python *)",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
+      "Read(//c/Users/tomas/AppData/Local/Programs/Python//**)",
+      "Bash(python -c \"import gurobipy; print\\(gurobipy.__version__\\)\")",
+      "Bash(pip list *)",
+      "Bash(where conda *)",
+      "Read(//c/Users/tomas/anaconda3/**)",
+      "Read(//c/Users/tomas/miniconda3/**)",
+      "Read(//c/ProgramData/Anaconda3/**)",
+      "Bash(/c/Users/tomas/anaconda3/python.exe -c \"import gurobipy; print\\('anaconda:', gurobipy.__version__\\)\")",
+      "Bash(/c/Users/tomas/miniconda3/python.exe -c \"import gurobipy; print\\('miniconda:', gurobipy.__version__\\)\")",
+      "Bash(ls /c/Users/tomas/anaconda3/envs/ 2>&1 *)",
+      "Read(//c/Users/tomas/**)",
+      "Bash(/c/Users/tomas/miniconda3/envs/gurobi-env/python.exe -c \"import gurobipy; print\\('gurobi-env:', gurobipy.__version__\\)\")",
+      "Bash(/c/Users/tomas/miniconda3/envs/ce-env/python.exe -c \"import gurobipy; print\\('ce-env:', gurobipy.__version__\\)\")",
+      "Bash(/c/Users/tomas/miniconda3/envs/ce-env/python.exe cache_setup.py)",
+      "Bash(/c/Users/tomas/miniconda3/envs/ce-env/python.exe repro_warmstart.py)",
+      "Bash(PYTHONIOENCODING=utf-8 /c/Users/tomas/miniconda3/envs/ce-env/python.exe repro_warmstart.py)",
+      "Bash(tasklist)",
+      "Bash(tasklist /v)",
+      "Bash(wmic process *)",
+      "Bash(taskkill /PID 2076 /F)",
+      "Bash(taskkill /PID 23320 /F)",
+      "Bash(cmd.exe //c \"taskkill /PID 2076 /F\")",
+      "Bash(cmd.exe //c \"taskkill /PID 23320 /F\")",
+      "Bash(PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -u repro_warmstart.py)",
+      "Bash(cmd.exe //c \"for /f \\\\\"tokens=2\\\\\" %i in \\('tasklist /fi \\\\\"imagename eq python.exe\\\\\" /fo csv /nh'\\) do taskkill /PID %~i /F\")",
+      "Bash(cmd.exe //c \"taskkill /IM python.exe /F\")",
+      "Bash(PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -u repro_minimal_4a2.py)",
+      "Bash(PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -u repro_minimal_4a1.py)",
+      "Bash(PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -u repro_no_cache.py)",
+      "Bash(PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -u repro_warmstart.py --solve-iter2 30)",
+      "Bash(PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -u repro_warmstart.py --solve-iter2 5)",
+      "Bash(PYTHONIOENCODING=utf-8 PYTHONUNBUFFERED=1 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -u repro_warmstart.py --solve-iter2 60)",
+      "Bash(/c/Users/tomas/miniconda3/envs/ce-env/python.exe build_decomp_notebook.py)",
+      "Bash(PYTHONIOENCODING=utf-8 /c/Users/tomas/miniconda3/envs/ce-env/python.exe -c ' *)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\tomas\\.claude\\projects\\c--Users-tomas-Documents-GitHub-Counterfactual-Explanations-for-optimization-problems\\memory"
+    ]
+  }
+}

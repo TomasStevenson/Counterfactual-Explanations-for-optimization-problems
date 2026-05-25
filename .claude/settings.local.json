@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python build_notebook.py)",
+      "Bash(python -c ' *)",
+      "PowerShell(& \"C:\\\\Users\\\\tomas\\\\miniconda3\\\\Scripts\\\\conda.exe\" run -n ce-env python -c \"import sys; sys.path.insert\\(0, r'c:\\\\Users\\\\tomas\\\\Documents\\\\GitHub\\\\Counterfactual-Explanations-for-optimization-problems\\\\Mixed\\\\UC-Experiments'\\); import uc_decomp_4b; from uc_decomp_4b import UCDecomp4b; import inspect; sig = inspect.signature\\(UCDecomp4b.__init__\\); print\\('b_hat_hint' in sig.parameters\\); print\\([x for x in dir\\(UCDecomp4b\\) if 'inject' in x]\\)\" 2>&1)"
+    ]
+  }
+}

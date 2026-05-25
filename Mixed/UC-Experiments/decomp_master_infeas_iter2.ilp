@@ -1,0 +1,28 @@
+\ Model network_uc_copy
+\ LP format - for model browsing. Use MPS format to capture full model detail.
+\ Signature: 0x16ac7d5d5491f6b3
+Minimize
+ 
+Subject To
+ R17158: curt_0[3,13] <= 350
+ R21265: sp_0[56,13] <= 0
+ R26363: - b[69] - f_0[69,13] <= 0
+ R28207: f_0[69,13] + shed_0[56,13] - curt_0[3,13] - curt_0[4,13]
+   - sp_0[56,13] + sm_0[56,13] = -698.4687156970363
+ R32959: pi_0[56,13] + gsh_ub_0[56,13] - gsh_lb_0[56,13] = -500
+ R33079: - pi_0[56,13] + gcu_ub_0[4,13] - gcu_lb_0[4,13] = -5
+ R50088: gsh_lb_0[56,13] + 500 C39078 <= 500
+ R50568: gcu_lb_0[4,13] + 500 C39318 <= 500
+ R50569: curt_0[4,13] - 351 C39318 <= 0
+Bounds
+ -infinity <= b[69] <= 300
+ f_0[69,13] free
+ curt_0[3,13] free
+ curt_0[4,13] free
+ sp_0[56,13] free
+ pi_0[56,13] free
+ gsh_lb_0[56,13] free
+ gcu_lb_0[4,13] free
+Binaries
+ C39078 C39318
+End
