@@ -114,16 +114,19 @@ def build_uc_relax_master_varfmax_4b(
     foil_extra_constr_fn=None,
     cost_ub: Optional[float] = None,
     output_flag: int = 0,
-    w: Optional[np.ndarray] = None,   # <-- ADD THIS
+    w: Optional[np.ndarray] = None,
+    lp_relax: bool = True,
 ):
     """
-    Master relaxation inside one node:
+    Master problem inside one node:
       min ||b - b0||_1 over free lines
-      s.t. relaxed-UC constraints + variable line limits (b) + foil constraints
+      s.t. UC constraints + variable line limits (b) + foil constraints
            optional operational cost upper bound: cvec @ z <= cost_ub
-      where binaries are relaxed to [0,1].
 
-    Returns: (model, var, bcap_vars, obj_expr_terms)
+    If lp_relax=True, the commitment binaries u/v/w are relaxed to [0,1].
+    If lp_relax=False, u/v/w remain binary and the returned model is a MIP.
+
+    Returns: (model, var, bcap_vars)
     """
     nL = len(data.lines)
     T = int(data.T)
@@ -140,10 +143,11 @@ def build_uc_relax_master_varfmax_4b(
         output_flag=output_flag,
     )
 
-        # 2) Relax binaries
-    _relax_tupledict_binary_4b(var["u"])
-    _relax_tupledict_binary_4b(var["v"])
-    _relax_tupledict_binary_4b(var["w"])
+    # 2) Optional LP relaxation of commitment binaries
+    if bool(lp_relax):
+        _relax_tupledict_binary_4b(var["u"])
+        _relax_tupledict_binary_4b(var["v"])
+        _relax_tupledict_binary_4b(var["w"])
 
     # 3) Remove fixed line limits
     removed = remove_fixed_fmax_constraints_4b(m)
