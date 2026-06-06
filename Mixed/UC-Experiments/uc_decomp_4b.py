@@ -2702,12 +2702,21 @@ class UCDecomp4b:
         global_LB = min(bx["lb"] for bx in leaves) if leaves else global_UB
         # A valid LB never exceeds the best achieved incumbent.
         global_LB = min(global_LB, global_UB)
+        # Serialize the open-leaf frontier (b-bounds + the box's proven LB) so a
+        # parallel driver can DISTRIBUTE these adaptive boxes — best-first carving
+        # concentrates them where the CEs live, unlike a uniform static grid.
+        leaf_boxes = [
+            {"lo": {int(ell): float(bx["bounds"][ell][0]) for ell in free},
+             "hi": {int(ell): float(bx["bounds"][ell][1]) for ell in free},
+             "lb": float(bx["lb"])}
+            for bx in leaves
+        ]
         if self.verbose:
             print(f"  [NODE-OBBT] DONE: global_LB={global_LB:.4f}  "
                   f"global_UB={global_UB:.4f}  gap={global_UB-global_LB:.4f}  "
                   f"boxes={nodes_done}  status={status}")
         return {"LB": global_LB, "UB": global_UB, "b_k": b_k_global,
-                "status": status, "boxes": nodes_done}
+                "status": status, "boxes": nodes_done, "leaves": leaf_boxes}
 
     # ------------------------------------------------------------------
     # Main loop
@@ -2725,6 +2734,7 @@ class UCDecomp4b:
 
         self._keepalive.start()
         master_LB: float = 0.0
+        node_boxes = None                 # node-OBBT open-leaf frontier (for HPC emit)
         seen: Set[tuple] = set()
         patterns: List[np.ndarray] = []   # u^j patterns in iteration order
         j = 0
@@ -2998,6 +3008,7 @@ class UCDecomp4b:
                     )
                     iter_LB = float(_spatial["LB"])
                     master_LB = max(master_LB, iter_LB)
+                    node_boxes = _spatial.get("leaves")   # frontier for HPC emit
                     nL = len(self.data.lines)
                     b_k = np.array(_spatial["b_k"], dtype=float)
                     # "certified" ⇒ the spatial tree closed (solved to optimality)
@@ -3026,8 +3037,17 @@ class UCDecomp4b:
                     # Accept TIME_LIMIT if Gurobi found at least one feasible solution
                     tl_hit = (m.Status == GRB.TIME_LIMIT)
                     if tl_hit and m.SolCount == 0:
+                        # No incumbent, but ObjBound is STILL a valid LB on F*
+                        # (≤ the box/master optimum) — capture it before breaking
+                        # so a cold box (e.g. a parallel sub-box without the hint)
+                        # contributes its real bound instead of the 0.0 placeholder.
+                        try:
+                            master_LB = max(master_LB, float(m.ObjBound))
+                        except Exception:
+                            pass
                         if self.verbose:
-                            print("  [DECOMP] Time limit hit with no feasible master solution — stopping.")
+                            print("  [DECOMP] Time limit hit with no feasible master solution — "
+                                  f"stopping (kept ObjBound LB={master_LB:.4f}).")
                         termination_reason = "time_limit_no_incumbent"
                         break
 
@@ -3321,4 +3341,7 @@ class UCDecomp4b:
             # "time_limit_no_incumbent" | "master_infeasible" | "sp1_infeasible"
             # | "master_status_<N>" | "max_iter".
             "termination_reason": termination_reason,
+            # node-OBBT open-leaf frontier (list of {lo, hi, lb}) — the adaptive,
+            # CE-concentrated b-box partition, for `node_obbt_hpc.py emit --adaptive`.
+            "node_boxes": node_boxes,
         }

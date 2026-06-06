@@ -379,11 +379,44 @@ levels to generate a *good* box frontier (concentrated where CEs live), then dis
 The best-first split rule + snapshot/restore are already in place; v2 only needs to serialize
 the driver's open `leaves` instead of a static grid.
 
-### Next
-1. **v2 adaptive-frontier emit** (above) — the real parallel-efficiency win.
-2. Run the IEEE 57 / IEEE 14 boxes-to-certify sweep on Leftraru with the array (high per-box
-   budget × many boxes) — the port is ready.
-3. Optional: per-box OBBT re-tightening only the SPLIT line's μ (cheap, may help deeper).
+### v2 adaptive-frontier emit + the cold-start / weakest-box finding (2026-06-06)
+
+Implemented **`emit --adaptive`**: the in-process best-first driver carves a CE-concentrated
+frontier (small `--emit-budget`), and its open `leaves` (now returned via `run()`’s
+`node_boxes`) become the parallel boxes. Also fixed a real **missed-bound bug in `run()`**: a box
+whose MIQCP times out with NO incumbent used to return `master_LB=0.0` (placeholder), discarding
+the valid `ObjBound`; now it keeps `max(master_LB, ObjBound)` — essential for cold parallel boxes.
+
+**IEEE 14, 4 adaptive boxes @180 s (post-fix):** box bounds `[1.0231, 1.4516, 2.2194, 2.2753]`
+→ `global_LB = 1.0231`. **Two findings:**
+1. The `ObjBound` fix works — cold boxes contribute REAL bounds; boxes 2 & 3 proved ≈ 2.22 / 2.28
+   (**near `F*≈2.37`**) even without an incumbent. **Most of IEEE 14’s b-box certifies near
+   optimal easily; only a small hard region is the bottleneck.**
+2. **Static distribution is pinned by the WEAKEST box.** Adaptive `global_LB` (1.02) is *worse*
+   than the uniform grid (1.43) because `global_LB = min over boxes` and box 0 solved weakly
+   (cold: the hint CE lives in only one box; the rest solve cold, and the master is hostile to
+   cold incumbent search). One-shot static distribution does NOT refine the weakest box, so it
+   loses the best-first driver’s key advantage.
+
+**⇒ The parallel design that actually closes the gap is ITERATIVE, not one-shot:**
+distribute the frontier → solve → split the box pinning `global_LB` → redistribute (a coordinator
+over Slurm rounds), and/or give each box a **per-box warm start** (carry the carve’s per-box
+incumbent — the driver finds it — into the parallel re-solve). The current `node_obbt_hpc.py`
+is the validity-correct building block (emit/solve/aggregate, min-ObjBound reduction); the
+coordinator loop + per-box hints are the v3 efficiency layer.
+
+**Boxes-to-certify estimate (revised, honest):** IEEE 14 is *mostly* easy (most boxes → ~2.2-2.3
+near `F*`); certification is gated by a small hard sub-region that needs deep best-first
+refinement (the in-process driver, or iterative parallel rounds) — NOT a uniform many-box sweep.
+IEEE 57 (4-box adaptive gap 7.37 %) is closer and a modest iterative refinement should certify.
+
+### Next (v3)
+1. **Iterative parallel coordinator** — rounds of distribute → solve → split-the-weakest →
+   redistribute; the best-first split rule + leaf serialization are already in place.
+2. **Per-box warm starts** — record each leaf’s best feasible `b` in the carve, pass it as that
+   box’s `b_hat_hint` so cold boxes solve well.
+3. Run the refinement on Leftraru (the port is the building block).
+4. Optional: per-box OBBT re-tightening only the SPLIT line’s μ.
 
 ---
 

@@ -91,9 +91,13 @@ def build_grid(grid):
                 run_kwargs=run_kwargs)
 
 
-def _make_decomp(g, bL_box, bU_box, budget, seed_interp, max_iter):
-    """Construct a UCDecomp4b restricted to a sub-box [bL_box, bU_box] (the
-    STANDARDISED config, node_obbt=False ⇒ one exact MIQCP solve per box)."""
+def _make_decomp(g, bL_box, bU_box, budget, seed_interp, max_iter,
+                 node=False, max_nodes=1):
+    """Construct a UCDecomp4b on [bL_box, bU_box] with the STANDARDISED config.
+
+    node=False ⇒ one exact MIQCP solve per box (the `solve` path).
+    node=True  ⇒ the in-process spatial driver carves a frontier (the `emit
+                 --adaptive` path); `budget` is then the cheap per-box carve TL."""
     _threads = os.environ.get("GRB_THREADS")           # set by node_obbt.slurm
     return UCDecomp4b(
         oracle=g["oracle"], data=g["DATA"], idx=g["idx"], cvec=g["cvec"],
@@ -106,6 +110,7 @@ def _make_decomp(g, bL_box, bU_box, budget, seed_interp, max_iter):
         bilinear_exact=True, obbt=True, obbt_iter=1,   # iter=1: valid without the guard
         master_mip_focus=3, master_multistart=1, master_seed=0,
         master_threads=(int(_threads) if _threads else None),
+        node_obbt=node, node_obbt_max_nodes=max_nodes, node_obbt_budget=budget,
     )
 
 
@@ -115,31 +120,47 @@ def _make_decomp(g, bL_box, bU_box, budget, seed_interp, max_iter):
 def cmd_emit(args):
     g = build_grid(args.grid)
     free = g["free_idx"]; bL = g["bL"]; bU = g["bU"]; bh = g["b_hint"]; b0 = g["b0"]
-    # Split the `dims` lines the hint CE EXPANDS MOST (largest |b_hat − b0|): that
-    # is where the counterfactual region has extent, so partitioning there
-    # actually subdivides the CE region (uniformly splitting the widest *bound*
-    # range tends to put every CE in one segment and leave the rest infeasible).
-    # segs**dims is the smallest power ≥ n_boxes (an exhaustive grid).
-    ranked = sorted(free, key=lambda e: abs(bh[e] - b0[e]), reverse=True)
-    if abs(bh[ranked[0]] - b0[ranked[0]]) <= 1e-9:        # degenerate hint → fall back
-        ranked = sorted(free, key=lambda e: bU[e] - bL[e], reverse=True)
-    dims = max(1, min(args.dims, len(free)))
-    split_lines = ranked[:dims]
-    segs = max(2, int(np.ceil(args.n_boxes ** (1.0 / dims))))
-    # build per-line segment edges
-    edges = {ell: np.linspace(bL[ell], bU[ell], segs + 1) for ell in split_lines}
-    # cartesian product of segment indices
-    import itertools
-    boxes = []
-    for combo in itertools.product(range(segs), repeat=dims):
-        lo = {int(ell): float(bL[ell]) for ell in free}
-        hi = {int(ell): float(bU[ell]) for ell in free}
-        for d, ell in enumerate(split_lines):
-            lo[int(ell)] = float(edges[ell][combo[d]])
-            hi[int(ell)] = float(edges[ell][combo[d] + 1])
-        boxes.append({"lo": lo, "hi": hi})
+    mode = "adaptive" if args.adaptive else "grid"
+    split_lines = []
+    if args.adaptive:
+        # v2: run the in-process best-first driver CHEAPLY (small per-box carve
+        # budget) to carve a CE-CONCENTRATED frontier, then distribute THOSE
+        # leaves.  Each leaf is re-solved at full budget by the Slurm array.  The
+        # adaptive partition splits exactly the box pinning global_LB, unlike a
+        # uniform grid (where the F-cap leaves most cells infeasible).
+        dec = _make_decomp(g, bL, bU, args.emit_budget, args.seed_interp,
+                           max_iter=1, node=True, max_nodes=args.n_boxes)
+        res = dec.run(**g["run_kwargs"])
+        leaves = res.get("node_boxes") or []
+        boxes = [{"lo": {int(k): float(v) for k, v in lf["lo"].items()},
+                  "hi": {int(k): float(v) for k, v in lf["hi"].items()}}
+                 for lf in leaves]
+        if not boxes:                       # driver certified at box 1 → 1 box
+            boxes = [{"lo": {int(e): float(bL[e]) for e in free},
+                      "hi": {int(e): float(bU[e]) for e in free}}]
+    else:
+        # Static grid: split the `dims` lines the hint CE EXPANDS MOST
+        # (largest |b_hat − b0|) into segs**dims sub-boxes — that is where the CE
+        # region has extent (uniformly splitting the widest *bound* range tends
+        # to put every CE in one segment and leave the rest infeasible).
+        ranked = sorted(free, key=lambda e: abs(bh[e] - b0[e]), reverse=True)
+        if abs(bh[ranked[0]] - b0[ranked[0]]) <= 1e-9:    # degenerate hint → fall back
+            ranked = sorted(free, key=lambda e: bU[e] - bL[e], reverse=True)
+        dims = max(1, min(args.dims, len(free)))
+        split_lines = ranked[:dims]
+        segs = max(2, int(np.ceil(args.n_boxes ** (1.0 / dims))))
+        edges = {ell: np.linspace(bL[ell], bU[ell], segs + 1) for ell in split_lines}
+        import itertools
+        boxes = []
+        for combo in itertools.product(range(segs), repeat=dims):
+            lo = {int(ell): float(bL[ell]) for ell in free}
+            hi = {int(ell): float(bU[ell]) for ell in free}
+            for d, ell in enumerate(split_lines):
+                lo[int(ell)] = float(edges[ell][combo[d]])
+                hi[int(ell)] = float(edges[ell][combo[d] + 1])
+            boxes.append({"lo": lo, "hi": hi})
     os.makedirs(args.outdir, exist_ok=True)
-    spec = dict(grid=args.grid, n_boxes=len(boxes), dims=dims, segs=segs,
+    spec = dict(grid=args.grid, n_boxes=len(boxes), mode=mode,
                 split_lines=[int(e) for e in split_lines],
                 budget=args.budget, seed_interp=args.seed_interp,
                 max_iter=args.max_iter, free_idx=[int(e) for e in free],
@@ -147,8 +168,8 @@ def cmd_emit(args):
     json.dump(spec, open(os.path.join(args.outdir, "spec.json"), "w"), indent=2)
     for i, bx in enumerate(boxes):
         json.dump(bx, open(os.path.join(args.outdir, f"box_{i:04d}.json"), "w"))
-    print(f"[emit] grid=IEEE{args.grid}  free={len(free)}  split_lines={spec['split_lines']}"
-          f"  segs={segs}  -> {len(boxes)} boxes in {args.outdir}")
+    print(f"[emit] grid=IEEE{args.grid}  mode={mode}  free={len(free)}  "
+          f"split_lines={spec['split_lines']}  -> {len(boxes)} boxes in {args.outdir}")
     print(f"[emit] submit a Slurm array of size {len(boxes)} (0..{len(boxes)-1}); "
           f"each task: python node_obbt_hpc.py solve {args.outdir} $SLURM_ARRAY_TASK_ID")
 
@@ -259,8 +280,10 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     e = sub.add_parser("emit"); e.add_argument("grid"); e.add_argument("n_boxes", type=int)
     e.add_argument("outdir")
-    e.add_argument("--dims", type=int, default=2, help="# most-CE-expanded free lines to split (grid = segs**dims boxes)")
-    e.add_argument("--budget", type=float, default=300.0, help="per-box master time limit (s)")
+    e.add_argument("--dims", type=int, default=2, help="[grid mode] # most-CE-expanded free lines to split (grid = segs**dims boxes)")
+    e.add_argument("--adaptive", action="store_true", help="v2: carve a best-first CE-concentrated frontier instead of a uniform grid")
+    e.add_argument("--emit-budget", type=float, default=60.0, help="[adaptive] cheap per-box carve time limit (s)")
+    e.add_argument("--budget", type=float, default=300.0, help="per-box master time limit (s) for the parallel `solve` step")
     e.add_argument("--seed-interp", type=int, default=3)
     e.add_argument("--max-iter", type=int, default=2)
     e.set_defaults(func=cmd_emit)
