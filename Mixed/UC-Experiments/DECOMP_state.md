@@ -410,13 +410,49 @@ near `F*`); certification is gated by a small hard sub-region that needs deep be
 refinement (the in-process driver, or iterative parallel rounds) — NOT a uniform many-box sweep.
 IEEE 57 (4-box adaptive gap 7.37 %) is closer and a modest iterative refinement should certify.
 
-### Next (v3)
-1. **Iterative parallel coordinator** — rounds of distribute → solve → split-the-weakest →
-   redistribute; the best-first split rule + leaf serialization are already in place.
-2. **Per-box warm starts** — record each leaf’s best feasible `b` in the carve, pass it as that
-   box’s `b_hat_hint` so cold boxes solve well.
-3. Run the refinement on Leftraru (the port is the building block).
-4. Optional: per-box OBBT re-tightening only the SPLIT line’s μ.
+### v3 iterative best-first coordinator — IMPLEMENTED + VALIDATED (2026-06-06)
+
+`node_obbt_coordinator.py` (init / solve-box / step / run-local / status) + `node_obbt_round.slurm`.
+The parallel best-first refinement the one-shot static port lacked:
+
+```
+round r:  solve every OPEN box (independent Slurm-array task)  →  collect ObjBound + in-box CE
+       →  prune (lb ≥ UB−tol)  →  SPLIT the split_k non-pruned leaves with the smallest lb
+       →  their children are round r+1’s OPEN boxes.        (repeat until UB−LB ≤ tol)
+```
+
+- **Validity (every round):** `global_LB = min over non-pruned leaf boxes of ObjBound ≤ F*`;
+  `global_UB = min(hint F, in-box CEs)`; pruned boxes (lb ≥ UB−tol) dropped. Children inherit the
+  parent’s (valid) lb, so unsolved leaves still carry a valid LB.
+- **Per-box warm start:** each box’s `warm` is ALWAYS a genuine CE (the global hint, or an in-box
+  CE once found) ⇒ `b_hat_hint` registration stays valid (no invalid UB). The child containing the
+  parent’s in-box CE inherits it (a real warm start there); the other falls back to the global CE.
+  (`_make_decomp` gained `b_hint_override`.)
+- **`--split-k`:** split the K weakest leaves per round (wider rounds = more parallel array width);
+  caps at the #non-pruned candidates.
+
+**Validation (IEEE 14 run-local):**
+| round | global_LB (120s/box) | note |
+|------:|---------------------:|------|
+| 1 | 1.3067 | solve root → split |
+| 2 | 1.3205 | box pruned + split (1 infeasible child auto-pruned) |
+| 3 | 1.3444 | |
+| 4 | 1.3458 | |
+
+`global_LB` rises **monotonically** (best-first refinement), infeasible children auto-pruned,
+`global_UB=2.3823` (hint, valid) throughout — the mechanism the one-shot static port could not do.
+Convergence rate is governed by **per-box budget × parallel width**: 60s/box → ~0.98, 120s/box →
+~1.35 (budget dominates, consistent with the scaling study); IEEE 14’s feasible region is a thin
+low-`b` sliver (each split → one feasible + one infeasible child), so best-first naturally tracks
+it. **Production certification = run on Leftraru with high per-box budget (≥600 s) and many
+rounds** (the array submit loop is in `node_obbt_round.slurm`); the local runs validate the
+mechanism, not the final gap.
+
+### Next
+1. **Run the v3 coordinator on Leftraru** at high per-box budget — the gap-closer for IEEE 14/57.
+2. Optional: warm-start the *infeasible-side* children less wastefully (skip solving a child whose
+   box the carve already proved CE-free).
+3. Optional: per-box OBBT re-tightening only the SPLIT line’s μ.
 
 ---
 

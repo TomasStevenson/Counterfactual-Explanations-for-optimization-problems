@@ -92,13 +92,17 @@ def build_grid(grid):
 
 
 def _make_decomp(g, bL_box, bU_box, budget, seed_interp, max_iter,
-                 node=False, max_nodes=1):
+                 node=False, max_nodes=1, b_hint_override=None):
     """Construct a UCDecomp4b on [bL_box, bU_box] with the STANDARDISED config.
 
     node=False ⇒ one exact MIQCP solve per box (the `solve` path).
     node=True  ⇒ the in-process spatial driver carves a frontier (the `emit
-                 --adaptive` path); `budget` is then the cheap per-box carve TL."""
+                 --adaptive` path); `budget` is then the cheap per-box carve TL.
+    b_hint_override ⇒ a per-box warm CE (must be a genuine CE so run()'s
+                 incumbent registration stays valid); the coordinator passes the
+                 box's in-box CE here, else the global hint."""
     _threads = os.environ.get("GRB_THREADS")           # set by node_obbt.slurm
+    b_hint = g["b_hint"] if b_hint_override is None else np.asarray(b_hint_override, float)
     return UCDecomp4b(
         oracle=g["oracle"], data=g["DATA"], idx=g["idx"], cvec=g["cvec"],
         foil_extra_constr_fn=g["foil_fn"],
@@ -106,7 +110,7 @@ def _make_decomp(g, bL_box, bU_box, budget, seed_interp, max_iter,
         big_M_mu=1e4, eps_obj=1e-3, max_iter=max_iter,
         verbose=True, w=g["w"], comp_mode="strongdual",
         master_time_limit=budget, master_output_flag=0, master_mip_gap=1e-4,
-        b_hat_hint=g["b_hint"], seed_patterns=True, seed_interp=seed_interp,
+        b_hat_hint=b_hint, seed_patterns=True, seed_interp=seed_interp,
         bilinear_exact=True, obbt=True, obbt_iter=1,   # iter=1: valid without the guard
         master_mip_focus=3, master_multistart=1, master_seed=0,
         master_threads=(int(_threads) if _threads else None),
