@@ -340,13 +340,50 @@ Only runtime budgets differ per grid (TL/box count scale with size); the ALGORIT
 - `_smoke_strongdual.py`: node/max_nodes/box_budget slots + announce line.
 - `_check_strongdual_valid.py`: `obbt_iter` slot (used to bisect the validity bug).
 
-### Next (HPC port + scaling)
-1. **Parallel-box distribution for NLHPC** — each box = an independent Slurm job; a driver
-   emits the open boxes, jobs solve+return ObjBound, aggregate `global_LB = min`. The
-   best-first split rule + the snapshot/restore are already in place; the loop just needs a
-   serialize-box / collect-bounds seam.
-2. **Scaling study** — IEEE 14/57 LB-vs-#boxes curve to estimate boxes-to-certify.
-3. Optional: per-box OBBT only re-tightening the SPLIT line's μ (cheap, may help deeper).
+### Scaling study + parallel-box HPC port — RESULTS (2026-06-05)
+
+**Theory note added:** `DECOMP_formulation_and_optimality.md` — formulation, the optimality
+guarantee (LB≤F*≤UB invariants, subset-relaxation + strong-duality-direction lemmas, the
+spatial-partition validity theorem), and why each upgrade is valid + faster.
+
+**LB-vs-#boxes scaling (IEEE 14, node-OBBT, MFOC=3):**
+| per-box budget | #boxes | global_LB | note |
+|---|---|---|---|
+| 120 s | 16 | 1.3484 | plateaus at box 7; 2 pruned |
+| 300 s | 3 | 1.5756 | |
+| (monolithic) | 1 | ~1.68 @1800 s | documented |
+| F* (strict CE) | — | ~2.37 | target |
+
+**Key finding: per-box budget DOMINATES box count.** `global_LB = min over leaf boxes`, so a
+single undersolved box pins the floor — 16 boxes @120 s (1.35) is WORSE than 3 boxes @300 s
+(1.58). Boxes only help once each is solved tightly enough to clear the floor. ⇒ certifying
+IEEE 14 needs BOTH high per-box budget (≥300 s) AND many boxes ⇒ a large *parallel* budget
+(the HPC case). IEEE 57 is closer (4 boxes @300 s → 7.37 %), so a modest array (8–16 boxes
+@300 s) should bring it to ~1–2 % or certify.
+
+**Parallel-box HPC port:** `node_obbt_hpc.py` (subcommands `emit` / `solve` / `aggregate`) +
+`node_obbt.slurm` (Leftraru array template: partition `main`, gurobipy PYTHONPATH, token-server
+license, `GRB_THREADS`). Each box = one independent Slurm task; `global_LB = min over boxes`.
+**Validity-correct:** an INFEASIBLE box (no CE cheaper than F_hint ≥ F*) cannot hold the global
+optimum → reported as `+∞` and **excluded** from the LB min (the run() placeholder
+`master_LB=0` would otherwise crash the bound to 0); `global_UB` is floored at the known hint CE
+`F(b_hat)` and oracle-re-verified. Tested end-to-end on IEEE 14 (4 boxes): `global_LB=1.4316`,
+`global_UB=2.3823` (verified), gap 39.9 %, 3 boxes pruned.
+
+**Port finding (partition quality is the lever, not validity):** a *uniform* `b`-split is
+correct but weak here — the `F ≤ F_hint` cap concentrates all CEs into one sub-region, so most
+boxes prune as infeasible and one box (undersolved) holds the CEs → no parallel speedup.
+Mitigations: (a) split the **CE-expanded** lines `argmax|b_hat−b0|` (now the `emit` default,
+`--dims 2`); (b) **v2 = adaptive-frontier emit** — run the in-process best-first driver a few
+levels to generate a *good* box frontier (concentrated where CEs live), then distribute those.
+The best-first split rule + snapshot/restore are already in place; v2 only needs to serialize
+the driver's open `leaves` instead of a static grid.
+
+### Next
+1. **v2 adaptive-frontier emit** (above) — the real parallel-efficiency win.
+2. Run the IEEE 57 / IEEE 14 boxes-to-certify sweep on Leftraru with the array (high per-box
+   budget × many boxes) — the port is ready.
+3. Optional: per-box OBBT re-tightening only the SPLIT line's μ (cheap, may help deeper).
 
 ---
 

@@ -1835,7 +1835,22 @@ class UCDecomp4b:
         # and iteration stops — OBBT can then only ever stay conservative.  This
         # makes OBBT self-validating for unattended HPC runs (no human gate).
         hint_ref = None
+        # The guard references the hint CE only when it is a genuinely
+        # exact-feasible point of THIS master.  Under a node/sub-box restriction
+        # (HPC parallel boxes), b_hat may lie OUTSIDE the current b-box — then the
+        # box, not OBBT, excludes it, and the guard must stay inactive (else it
+        # would wrongly roll back valid OBBT).  obbt_iter=1 keeps OBBT valid
+        # without the guard, so this is safe.
+        _hint_in_box = self.b_hat_hint is not None
         if self.b_hat_hint is not None:
+            for ell in self.free:
+                vb = m.getVarByName(f"b[{ell}]")
+                if vb is not None and not (
+                    float(vb.LB) - 1e-6 <= float(self.b_hat_hint[ell]) <= float(vb.UB) + 1e-6
+                ):
+                    _hint_in_box = False
+                    break
+        if self.b_hat_hint is not None and _hint_in_box:
             try:
                 hint_ref = {"b": np.asarray(self.b_hat_hint, float), "mu": {}}
                 for j_idx, u_j in enumerate(patterns):
