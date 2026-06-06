@@ -92,7 +92,7 @@ def build_grid(grid):
 
 
 def _make_decomp(g, bL_box, bU_box, budget, seed_interp, max_iter,
-                 node=False, max_nodes=1, b_hint_override=None):
+                 node=False, max_nodes=1, b_hint_override=None, time_limit=None):
     """Construct a UCDecomp4b on [bL_box, bU_box] with the STANDARDISED config.
 
     node=False ⇒ one exact MIQCP solve per box (the `solve` path).
@@ -115,6 +115,7 @@ def _make_decomp(g, bL_box, bU_box, budget, seed_interp, max_iter,
         master_mip_focus=3, master_multistart=1, master_seed=0,
         master_threads=(int(_threads) if _threads else None),
         node_obbt=node, node_obbt_max_nodes=max_nodes, node_obbt_budget=budget,
+        time_limit=time_limit,
     )
 
 

@@ -448,6 +448,33 @@ it. **Production certification = run on Leftraru with high per-box budget (≥60
 rounds** (the array submit loop is in `node_obbt_round.slurm`); the local runs validate the
 mechanism, not the final gap.
 
+### Time-limited benchmark + global time limit (2026-06-06)
+
+Added a real **global wall-clock time limit** and a results recorder so the CE solve can be run
+as a proper time-limited experiment (record CE, gap, time, hit-limit).
+
+- **`UCDecomp4b(time_limit=…)`** — global budget (s) for the whole `run()`. Checked between CCG
+  iterations AND inside the preamble (seeding loop + root-OBBT pass, per-pattern/per-line) so the
+  run never overshoots; each internal MIQCP solve's `TimeLimit` is also capped by the remaining
+  budget. On hit: `termination_reason="global_time_limit"`. `run()` now returns **`wall_time_s`**
+  and **`hit_time_limit`**. (A partial OBBT cut by the deadline is still valid — OBBT is monotone.)
+- **Coordinator** (`node_obbt_coordinator.py init --time-limit …`) — `run-local` enforces the
+  global budget across rounds, caps each box by the remaining budget, and records
+  `wall_time_s`/`hit_time_limit` in the state.
+- **`run_benchmark.py`** — runs each (solver ∈ {node, coordinator}) × (grid) under the budget and
+  appends a row to `results.csv` + a record to `results.json`:
+  `grid, solver, time_limit_s, F_opt (CE cost), master_LB, gap, gap_pct, certified, wall_time_s,
+  hit_time_limit, termination_reason, n_lines_changed, ce_changes` (+ full `b_hat`/`b0` in JSON).
+
+**Validated:** overshoot fixed (IEEE 39 @120 s limit: wall 127 s, was 514 s; `hit_TL=True`); realistic
+IEEE 39 @700 s: **certified** F=0.7060, gap≈0, wall 542 s, `hit_TL=False`, CE `L13:+2.819`; IEEE 14
+@150 s: `hit_TL=True`, F=2.3823, LB 0.885, gap 62.9 %, CE `L14:+6.825; L15:+7.556; L18:+2.925`.
+
+**Calibration:** `node` pays root OBBT ONCE then reuses the master — efficient sequentially.
+`coordinator` rebuilds the master (incl. OBBT) PER BOX (the price of independent parallel jobs), so
+`--per-box-budget` must exceed the per-box OBBT (~480 s on IEEE 39) — use **600 s**. Full run:
+`run_benchmark.py --time-limit 3600 --grids 14,39,57 --solvers node,coordinator --per-box-budget 600`.
+
 ### Next
 1. **Run the v3 coordinator on Leftraru** at high per-box budget — the gap-closer for IEEE 14/57.
 2. Optional: warm-start the *infeasible-side* children less wastefully (skip solving a child whose

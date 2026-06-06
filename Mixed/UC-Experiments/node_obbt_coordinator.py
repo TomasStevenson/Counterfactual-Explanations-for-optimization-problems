@@ -29,7 +29,7 @@ Subcommands:
 
 NLHPC loop:  init  ->  repeat { sbatch --array=<open ids> node_obbt_round.slurm <outdir>;  step }  until certified.
 """
-import os, sys, json, glob, argparse
+import os, sys, json, glob, argparse, time
 import numpy as np
 
 os.environ.setdefault("GRB_LICENSE_FILE", r"C:\Users\tomas\Desktop\gurobi.lic")
@@ -78,6 +78,7 @@ def cmd_init(args):
     st = {"grid": args.grid, "tol": args.tol, "next_id": 1, "round": 0,
           "budget": args.budget, "seed_interp": args.seed_interp,
           "max_iter": args.max_iter, "split_k": args.split_k,
+          "time_limit": args.time_limit,   # GLOBAL wall-clock budget for run-local
           "free_idx": [int(e) for e in free],
           "hint_F": hint_F, "global_UB": hint_F,
           "global_UB_b": [float(x) for x in bh],
@@ -93,8 +94,11 @@ def cmd_solve_box(args):
     box = next(b for b in st["boxes"] if b["id"] == args.box_id)
     bL_box, bU_box = _box_bounds(g, box)
     warm = _warm_full(g, box["warm"])
+    # per-box global cap: run-local passes the REMAINING global budget via args.tl;
+    # standalone (Slurm) falls back to the per-box budget.
+    tl = getattr(args, "tl", None) or st["budget"]
     dec = _make_decomp(g, bL_box, bU_box, st["budget"], st["seed_interp"],
-                       st["max_iter"], b_hint_override=warm)
+                       st["max_iter"], b_hint_override=warm, time_limit=tl)
     res = dec.run(**g["run_kwargs"])
     term = res.get("termination_reason")
     feasible = term != "master_infeasible"
@@ -179,16 +183,34 @@ def cmd_step(args):
 
 
 def cmd_run_local(args):
+    t0 = time.time()
+    tlim = _load(args.outdir).get("time_limit")     # GLOBAL wall-clock budget
+    hit = False
+    def _rem():
+        return (tlim - (time.time() - t0)) if tlim else float("inf")
     for _ in range(args.max_rounds):
         st = _load(args.outdir); open_ids = [b["id"] for b in _open(st)]
         if not open_ids:
             print("[run-local] no open boxes — done."); break
         for i in open_ids:
-            cmd_solve_box(argparse.Namespace(outdir=args.outdir, box_id=i))
+            if _rem() <= 0:
+                hit = True
+                print(f"[run-local] global time limit ({tlim:.0f}s) reached — stopping."); break
+            cmd_solve_box(argparse.Namespace(outdir=args.outdir, box_id=i,
+                                             tl=min(st["budget"], _rem())))
+        if hit: break
         cmd_step(argparse.Namespace(outdir=args.outdir))
         st = _load(args.outdir)
         if st["global_UB"] - _global_LB(st) <= st["tol"]:
             break
+        if _rem() <= 0:
+            hit = True; print(f"[run-local] global time limit ({tlim:.0f}s) reached — stopping."); break
+    # record wall-clock + hit-time-limit on the state
+    st = _load(args.outdir)
+    st["wall_time_s"] = time.time() - t0
+    certified = st["global_UB"] - _global_LB(st) <= st["tol"]
+    st["hit_time_limit"] = bool(hit or (tlim and not certified and st["wall_time_s"] >= tlim - 5.0))
+    _save(args.outdir, st)
     cmd_status(argparse.Namespace(outdir=args.outdir))
 
 
@@ -202,6 +224,9 @@ def cmd_status(args):
           f"(open={n['open']} solved={n['solved']} pruned={n['pruned']} internal={n['internal']})")
     print(f"  global_LB = {gLB:.6f}   global_UB = {gUB:.6f} (hint_F={st['hint_F']:.4f})")
     print(f"  gap = {100*gap:.2f}%" + ("   ✅ CERTIFIED" if gUB - gLB <= st["tol"] else ""))
+    if "wall_time_s" in st:
+        print(f"  wall_time = {st['wall_time_s']:.1f}s   hit_time_limit = {st.get('hit_time_limit')}"
+              + (f"  (limit {st['time_limit']:.0f}s)" if st.get("time_limit") else ""))
     print("=" * 64)
 
 
@@ -214,6 +239,7 @@ def main():
     i.add_argument("--max-iter", type=int, default=1)
     i.add_argument("--tol", type=float, default=1e-3)
     i.add_argument("--split-k", type=int, default=1, help="# weakest leaves to split per round (wider rounds = more parallel)")
+    i.add_argument("--time-limit", type=float, default=None, help="GLOBAL wall-clock budget (s) enforced by run-local")
     i.set_defaults(func=cmd_init)
     s = sub.add_parser("solve-box"); s.add_argument("outdir"); s.add_argument("box_id", type=int)
     s.set_defaults(func=cmd_solve_box)

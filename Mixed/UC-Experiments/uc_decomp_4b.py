@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Optional, Dict, List, Tuple, Callable, Set
 import json
 import pathlib
+import time
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
@@ -112,6 +113,7 @@ class UCDecomp4b:
         node_obbt_max_nodes: int = 16,     # max boxes to PROCESS before stopping (budget cap); the reported LB stays valid at any stop
         node_obbt_tol: Optional[float] = None,  # spatial-B&B gap tolerance (global_UB − global_LB); None ⇒ eps_obj
         node_obbt_per_box: bool = False,   # re-run the full OBBT μ-sweep at every box. Default OFF: a single-dimension b-split barely changes the achievable μ-max (μ[ell',t] depends on b[ell'], not the split line), so per-box OBBT tightens ~0 — measured on IEEE 14. The root μ.UB is already valid for any sub-box (sub-box ⊆ root ⇒ root μ.UB ≥ max over sub-box), so per box we keep root μ and only tighten b. Set True only to experiment with multi-dim deep splits.
+        time_limit: Optional[float] = None,  # GLOBAL wall-clock budget (s) for the whole run() call. Checked between CCG iterations / node boxes; each internal MIQCP solve's TimeLimit is also capped by the remaining budget so the run never overshoots. None = no global limit. On hit: termination_reason='global_time_limit', hit_time_limit=True in the result; the run still returns the best CE/LB/gap found so far. Distinct from master_time_limit (per single MIQCP solve).
     ):
         self.oracle   = oracle
         self.data     = data
@@ -183,6 +185,8 @@ class UCDecomp4b:
         self.node_obbt_tol       = (float(node_obbt_tol)
                                     if node_obbt_tol is not None else None)
         self.node_obbt_per_box   = bool(node_obbt_per_box)
+        self.time_limit          = (float(time_limit) if time_limit is not None else None)
+        self._t_start            = None   # set at run() entry
         if self.node_obbt:
             # Node-OBBT only makes sense on the exact-bilinear strongdual master
             # (it tightens μ/b per box to sharpen Gurobi's spatial relaxation of
@@ -220,6 +224,12 @@ class UCDecomp4b:
 
     def F(self, b: np.ndarray) -> float:
         return float(np.sum(self.w[self.free] * np.abs(b[self.free] - self.b0[self.free])))
+
+    def _remaining(self) -> float:
+        """Seconds left under the GLOBAL wall-clock budget (+inf if no limit)."""
+        if self.time_limit is None or self._t_start is None:
+            return float("inf")
+        return self.time_limit - (time.time() - self._t_start)
 
     def _pattern_key(self, u: np.ndarray) -> tuple:
         return tuple(u.ravel().astype(int).tolist())
@@ -1914,9 +1924,14 @@ class UCDecomp4b:
                             vv = m.getVarByName(nm)
                             if vv is not None:
                                 _pass_snap[nm] = (float(vv.LB), float(vv.UB))
+            _obbt_tl_hit = False
             for j_idx in range(len(patterns)):
+                if self._remaining() <= 0:        # GLOBAL deadline (per pattern)
+                    _obbt_tl_hit = True; break
                 s = f"_{j_idx}"
                 for ell in self.free:
+                    if self._remaining() <= 0:    # GLOBAL deadline (per free line)
+                        _obbt_tl_hit = True; break
                     for t in range(T):
                         for tag in ("mup", "mum"):
                             nm = f"{tag}{s}[{ell},{t}]"
@@ -1972,6 +1987,8 @@ class UCDecomp4b:
             # relaxation argument as the μ bounds (§4 of DECOMP_OBBT_offload.md).
             b_pass_tightened = 0
             for ell in self.free:
+                if _obbt_tl_hit or self._remaining() <= 0:   # GLOBAL deadline
+                    _obbt_tl_hit = True; break
                 nm_b = f"b[{ell}]"
                 var_R = R_lp.getVarByName(nm_b)
                 var_m = m.getVarByName(nm_b)
@@ -2037,6 +2054,11 @@ class UCDecomp4b:
                               f"rolled back {pass_tightened} bound(s) and stopped "
                               f"iterating (validity self-guard).")
                     break
+            if _obbt_tl_hit:
+                if self.verbose:
+                    print(f"[OBBT]   global time limit reached mid-OBBT — stopping with "
+                          f"partial (still valid) tightening.")
+                break
             if pass_tightened == 0:
                 break
             R_lp.update()
@@ -2592,6 +2614,9 @@ class UCDecomp4b:
 
         try:
             while nodes_done < self.node_obbt_max_nodes:
+                if self._remaining() <= 0:        # GLOBAL wall-clock budget
+                    status = "global_time_limit"
+                    break
                 global_LB = min(bx["lb"] for bx in leaves)
                 if global_UB - global_LB <= tol:
                     status = "certified"
@@ -2634,8 +2659,9 @@ class UCDecomp4b:
                         sync_bounds_from_m=True,
                     )
 
-                # bound the box's MIQCP (NonConvex=2 already set on m)
-                m.Params.TimeLimit   = self.node_obbt_budget
+                # bound the box's MIQCP (NonConvex=2 already set on m); cap the
+                # per-box budget by the remaining global budget (no overshoot).
+                m.Params.TimeLimit   = max(1.0, min(self.node_obbt_budget, self._remaining()))
                 m.Params.MIPFocus    = self.master_mip_focus
                 m.Params.NumericFocus = 2
                 if self.master_threads is not None:
@@ -2733,6 +2759,7 @@ class UCDecomp4b:
     ) -> Dict:
 
         self._keepalive.start()
+        self._t_start = time.time()       # GLOBAL wall-clock start (for time_limit)
         master_LB: float = 0.0
         node_boxes = None                 # node-OBBT open-leaf frontier (for HPC emit)
         seen: Set[tuple] = set()
@@ -2918,6 +2945,11 @@ class UCDecomp4b:
                         seed_bs.append((f"interp_{alpha:.2f}", b_mid))
                 n_seeded = 0
                 for tag, b_seed in seed_bs:
+                    if self._remaining() <= 0:        # GLOBAL deadline during seeding
+                        if self.verbose:
+                            print(f"  [SEED] global time limit reached — stopping seeding "
+                                  f"with {n_seeded} pattern(s).")
+                        break
                     vps, _, sps = self.oracle.solve_plain(b_seed)
                     if sps is None:
                         if self.verbose:
@@ -2965,10 +2997,19 @@ class UCDecomp4b:
                 )
 
             for k in range(self.max_iter):
+                # GLOBAL wall-clock budget: stop cleanly between iterations and
+                # return the best CE/LB/gap so far (flagged hit_time_limit).
+                if self._remaining() <= 0:
+                    if self.verbose:
+                        print(f"  [DECOMP] Global time limit ({self.time_limit:.0f}s) reached "
+                              f"— stopping with best result so far.")
+                    termination_reason = "global_time_limit"
+                    break
                 if self.verbose:
                     nv, nc, ni = m.NumVars, m.NumConstrs, m.NumIntVars
                     print(f"\n[DECOMP] Iter {k+1}/{self.max_iter}  "
-                          f"model: {nv} vars ({ni} int), {nc} constrs")
+                          f"model: {nv} vars ({ni} int), {nc} constrs  "
+                          f"(t_left={self._remaining():.0f}s)")
 
                 m.Params.OutputFlag   = self.master_output_flag
                 m.Params.MIPGap       = self.master_mip_gap
@@ -2979,8 +3020,13 @@ class UCDecomp4b:
                 # "Master-MIP scaling is the lever".
                 m.Params.MIPFocus     = self.master_mip_focus
                 m.Params.NumericFocus = 2   # extra care with near-degenerate numerics
+                # Cap this solve's TimeLimit by min(master_time_limit, remaining
+                # global budget) so the run never overshoots the global deadline.
+                _tl = self._remaining()
                 if self.master_time_limit is not None:
-                    m.Params.TimeLimit = self.master_time_limit
+                    _tl = min(_tl, self.master_time_limit)
+                if _tl < float("inf"):
+                    m.Params.TimeLimit = max(1.0, _tl)
                 if self.master_threads is not None:
                     m.Params.Threads = int(self.master_threads)
 
@@ -3315,6 +3361,15 @@ class UCDecomp4b:
             self._keepalive.stop()
 
         gap = self.best_F - master_LB
+        _wall = (time.time() - self._t_start) if self._t_start is not None else None
+        _certified = gap <= self.eps_obj and self.best_F < float("inf")
+        # "Hit the time limit" = stopped on the global deadline, OR ran (nearly)
+        # the whole global budget without certifying.  (A run that stops early via
+        # cycle/max_iter with budget to spare is NOT a time-limit hit.)
+        _hit_tl = (termination_reason == "global_time_limit") or (
+            self.time_limit is not None and not _certified
+            and _wall is not None and _wall >= self.time_limit - 5.0
+        )
         return {
             # Best certified CE.  Guaranteed populated iff b_hat_hint was given
             # AND its foil oracle returned a solution (we trust the input was a
@@ -3339,9 +3394,13 @@ class UCDecomp4b:
             "candidate":     candidate,
             # Why the loop exited: "certified_optimal" | "cycle" |
             # "time_limit_no_incumbent" | "master_infeasible" | "sp1_infeasible"
-            # | "master_status_<N>" | "max_iter".
+            # | "master_status_<N>" | "max_iter" | "global_time_limit".
             "termination_reason": termination_reason,
             # node-OBBT open-leaf frontier (list of {lo, hi, lb}) — the adaptive,
             # CE-concentrated b-box partition, for `node_obbt_hpc.py emit --adaptive`.
             "node_boxes": node_boxes,
+            # Benchmark fields: actual wall-clock seconds, and whether the run
+            # stopped because of the global time_limit (vs certifying / early exit).
+            "wall_time_s": _wall,
+            "hit_time_limit": bool(_hit_tl),
         }
