@@ -17,14 +17,29 @@ from gurobipy import GRB
 
 import time as _time
 
-def _optimize_with_retry(m: gp.Model, max_retries: int = 3, wait: float = 30.0) -> None:
+def _optimize_with_retry(m: gp.Model, max_retries: int = 8, wait: float = 15.0,
+                         backoff: float = 2.0, max_wait: float = 600.0) -> None:
     """
-    Call m.optimize() with retry logic for transient Gurobi license errors
-    (GurobiError errno 6 — cannot reach token.gurobi.com).
+    Call m.optimize() with retry logic for transient Gurobi license / network
+    errors (GurobiError errno 6 — cannot reach token.gurobi.com, "Could not
+    resolve host", etc.).  Uses EXPONENTIAL BACKOFF so an unattended HPC run
+    survives cluster network blips that can outlast a short fixed window
+    (default total budget ≈ 15·(2^8−1) capped at 600s/step ≈ tens of minutes).
 
     On a license error, checks whether the model object is still usable
     (m.Status accessible) before retrying. If the model is dead, re-raises.
+    A full machine power-off is unrecoverable (the process itself dies); this
+    only protects against transient connectivity loss while the process lives.
+
+    Tunable via env vars for HPC: GRB_RETRY_MAX, GRB_RETRY_WAIT.
     """
+    import os as _os
+    try:
+        max_retries = int(_os.environ.get("GRB_RETRY_MAX", max_retries))
+        wait = float(_os.environ.get("GRB_RETRY_WAIT", wait))
+    except Exception:
+        pass
+    cur_wait = wait
     for attempt in range(max_retries):
         try:
             m.optimize()
@@ -38,10 +53,12 @@ def _optimize_with_retry(m: gp.Model, max_retries: int = 3, wait: float = 30.0) 
             except gp.GurobiError:
                 raise e  # model is dead — re-raise original error
             print(
-                f"[Gurobi] License refresh failed (errno=6), "
-                f"retry {attempt + 1}/{max_retries} in {wait:.0f}s ..."
+                f"[Gurobi] License/network error (errno=6), "
+                f"retry {attempt + 1}/{max_retries} in {cur_wait:.0f}s ...",
+                flush=True,
             )
-            _time.sleep(wait)
+            _time.sleep(cur_wait)
+            cur_wait = min(cur_wait * backoff, max_wait)
 
 
 # ============================================================

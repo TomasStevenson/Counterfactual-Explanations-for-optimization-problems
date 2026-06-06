@@ -15,7 +15,7 @@ cells.append(md(
     "## Applied to IEEE 14-bus, IEEE 39-bus, IEEE 57-bus\n\n"
     "**Algorithm:** DECOMP (Column-and-Constraint Generation, Yue et al. 2019) adapted "
     "for b-parameter counterfactual explanations in UC.\n\n"
-    "Objective: find minimum change to line flow limits b such that the 20% emissions-reduction "
+    "Objective: find minimum change to line flow limits b such that the 10% emissions-reduction "
     "foil becomes UC-optimal.\n"
 ))
 
@@ -387,7 +387,9 @@ cells.append(code(
 
 def decomp_cell(g, big_M_mult=1.0, time_limit=300,
                 master_out=0, max_iter=15, suffix="", comp_mode="sos1",
-                use_bs_hint=True):
+                use_bs_hint=True, seed_patterns=False, mccormick_mu_factor=None,
+                mccormick_segments=1, bilinear_exact=False, obbt=False,
+                master_mip_focus=1, seed_interp=0):
     """Generate one DECOMP run cell.
 
     use_bs_hint: if True, load b_hat from bs_{g}_checkpoint.json (if it exists)
@@ -432,6 +434,13 @@ def decomp_cell(g, big_M_mult=1.0, time_limit=300,
         f"    master_output_flag={master_out},\n"
         f"    master_mip_gap=1e-4,\n"
         f'    comp_mode="{comp_mode}",\n'
+        f'    seed_patterns={seed_patterns},\n'
+        f'    mccormick_mu_factor={mccormick_mu_factor},\n'
+        f'    mccormick_segments={mccormick_segments},\n'
+        f'    bilinear_exact={bilinear_exact},\n'
+        f'    obbt={obbt},\n'
+        f'    master_mip_focus={master_mip_focus},\n'
+        f'    seed_interp={seed_interp},\n'
         + (f"    b_hat_hint=_bs_hint_{g},\n" if use_bs_hint else "")
         + f")\n"
         f"{res} = {var}.run(\n"
@@ -742,91 +751,200 @@ cells.append(decomp_cell("57", big_M_mult=1.0, time_limit=900,
 cells.append(md("**Step 3/3** — Plot result"))
 cells.append(plot_decomp_cell("57"))
 
-# ── Section 4c · LB-stagnation Fix 1 (hybrid bigM + indicator) ────────────────
+# ── Section 4d · LB-stagnation Fix 2 (strong duality + McCormick) ─────────────
 cells.append(md(
-    "---\n## Section 4c · Fix 1: `comp_mode=\"hybrid\"` (LB-stagnation experiment)\n\n"
-    "Same B&S warm-start pipeline as 4b, but with `comp_mode=\"hybrid\"`: bigM is "
-    "kept only for free-line flow-limit complementarity pairs (whose slack "
-    "`b[ell] ± f^j` involves a master decision variable), and **all other** "
-    "complementarity pairs (gen bounds, ramps, shed, curt, shift) are encoded "
-    "as Gurobi indicator constraints.  Indicators are enforced by B&B branching "
-    "and **do not** linearise to a loose big-M in the LP relaxation, so each "
-    "new KKT block actually tightens `ObjBound` instead of being absorbed by "
-    "fractional `z`s.  See `DECOMP_lb_stagnation.md` Fix 1.\n\n"
-    "Per-iteration `[LB diag]` lines (always printed in verbose mode) report "
-    "`ObjBound` (CCG lower bound), `ObjVal` (incumbent upper bound), `MIPGap`, "
-    "and the freshly solved Root LP value from `m.relax()`.  Compare against "
-    "4b: in bigM mode `ObjBound ≈ Root LP ≈ constant` across iterations; with "
-    "hybrid we expect `ObjBound` to grow each iteration.\n\n"
-    "Results are stored in `res_14_hybrid`, `res_39_hybrid`, `res_57_hybrid` "
-    "(distinct from the bigM `res_<g>` baselines)."
+    "---\n## Section 4d · Fix 2: `comp_mode=\"strongdual\"` (LB-stagnation experiment)\n\n"
+    "Same B&S warm-start pipeline as 4b, but with `comp_mode=\"strongdual\"`.  "
+    "Instead of encoding complementarity per pair (big-M / indicator / SOS1), the "
+    "dispatch LP's optimality is enforced by a single **strong-duality equality** "
+    "`cᵀxʲ = dual_obj` together with the primal-feasibility and "
+    "stationarity constraints already in each KKT block.  For an LP this triple "
+    "is equivalent to optimality, so **no `z` binaries are needed at all** — the "
+    "only integer variables left in the master are the foil commitments "
+    "`u_foil`.  The single nonlinearity, the dual term "
+    "`−Σ b[ell]·(μ_p+μ_m)` on free lines (bilinear because "
+    "`b` is a master variable), is linearised with **McCormick** auxiliaries "
+    "`w = b·μ`.  See `DECOMP_lb_stagnation.md` Fix 2.\n\n"
+    "Expected vs 4b: the master MILP shrinks dramatically (thousands of `z` "
+    "binaries removed), each iteration solves to proven optimality instead of "
+    "hitting the time limit, the Root LP becomes non-zero (McCormick couples `b` "
+    "to the duals), and `ObjBound` lifts off 0.  Results stored in "
+    "`res_14_sd`, `res_39_sd`, `res_57_sd`."
 ))
 
-# IEEE 14 hybrid
-cells.append(md("### 4c.1 · IEEE 14-bus — hybrid"))
+# IEEE 14 strongdual
+cells.append(md("### 4d.1 · IEEE 14-bus — strongdual"))
 cells.append(decomp_cell("14", big_M_mult=1.0, time_limit=900,
-                          master_out=1, max_iter=15, suffix="_hybrid",
-                          comp_mode="hybrid"))
+                          master_out=1, max_iter=15, suffix="_sd",
+                          comp_mode="strongdual"))
 
-# IEEE 39 hybrid
-cells.append(md("### 4c.2 · IEEE 39-bus — hybrid"))
+# IEEE 39 strongdual
+cells.append(md("### 4d.2 · IEEE 39-bus — strongdual"))
 cells.append(decomp_cell("39", big_M_mult=1.0, time_limit=900,
-                          master_out=1, max_iter=15, suffix="_hybrid",
-                          comp_mode="hybrid"))
+                          master_out=1, max_iter=15, suffix="_sd",
+                          comp_mode="strongdual"))
 
-# IEEE 57 hybrid
-cells.append(md("### 4c.3 · IEEE 57-bus — hybrid"))
+# IEEE 57 strongdual
+cells.append(md("### 4d.3 · IEEE 57-bus — strongdual"))
 cells.append(decomp_cell("57", big_M_mult=1.0, time_limit=900,
-                          master_out=1, max_iter=15, suffix="_hybrid",
-                          comp_mode="hybrid"))
+                          master_out=1, max_iter=15, suffix="_sd",
+                          comp_mode="strongdual"))
 
-# Side-by-side bigM vs hybrid summary
+# Two-way comparison: bigM vs strongdual
 cells.append(md(
-    "### 4c.4 · Comparison summary (bigM vs hybrid)\n"
-    "Side-by-side per-grid comparison of certified gap and final LB.  "
-    "Hybrid should show strictly higher (or equal) `master_LB` and smaller `gap_pct`."
+    "### 4d.4 · Comparison summary (bigM vs strongdual)\n"
+    "Per-grid `F_opt / LB / gap%`.  Fix 2 (strongdual) should show a much higher "
+    "`master_LB` and smaller `gap_pct` than bigM (whose ObjBound stagnates near 0); "
+    "`F_opt` should match (the incumbent CE is found the same way — only the bound "
+    "changes).  strongdual is the valid-LB baseline that Section 4g (exact + OBBT) "
+    "tightens further."
 ))
 cells.append(code(
     "def _fmt(r):\n"
     "    if r is None or not r.get('success'):\n"
-    "        return f\"{'N/A':>10} {'N/A':>10} {'N/A':>8}\"\n"
-    "    return (f\"{r['F_opt']:>10.4f} {r['master_LB']:>10.4f} \"\n"
-    "            f\"{r['gap_pct']:>7.2f}%\")\n"
+    "        return f\"{'N/A':>9} {'N/A':>9} {'N/A':>7}\"\n"
+    "    return f\"{r['F_opt']:>9.4f} {r['master_LB']:>9.4f} {r['gap_pct']:>6.2f}%\"\n"
     "\n"
-    "print(f\"{'':<14} | {'=== bigM ===':^29} | {'=== hybrid ===':^29}\")\n"
-    "print(f\"{'Grid':<14} | {'F_opt':>10} {'LB':>10} {'gap%':>8} | \"\n"
-    "      f\"{'F_opt':>10} {'LB':>10} {'gap%':>8}\")\n"
-    "print('-' * 78)\n"
-    "for label, r_bm, r_hy in [\n"
-    "    ('IEEE 14-bus', globals().get('res_14'), globals().get('res_14_hybrid')),\n"
-    "    ('IEEE 39-bus', globals().get('res_39'), globals().get('res_39_hybrid')),\n"
-    "    ('IEEE 57-bus', globals().get('res_57'), globals().get('res_57_hybrid')),\n"
-    "]:\n"
-    "    print(f'{label:<14} | {_fmt(r_bm)} | {_fmt(r_hy)}')\n"
+    "hdr = f\"{'F_opt':>9} {'LB':>9} {'gap%':>7}\"\n"
+    "print(f\"{'':<13} | {'=== bigM ===':^27} | {'== strongdual ==':^27}\")\n"
+    "print(f\"{'Grid':<13} | {hdr} | {hdr}\")\n"
+    "print('-' * 71)\n"
+    "for label, g in [('IEEE 14-bus', '14'), ('IEEE 39-bus', '39'), ('IEEE 57-bus', '57')]:\n"
+    "    r_bm = globals().get(f'res_{g}')\n"
+    "    r_sd = globals().get(f'res_{g}_sd')\n"
+    "    print(f'{label:<13} | {_fmt(r_bm)} | {_fmt(r_sd)}')\n"
+))
+
+# ── Section 4g · EXACT bilinear + root OBBT (rigorous valid certificate) ──────
+cells.append(md(
+    "---\n## Section 4g · strongdual + **exact bilinear + root OBBT** "
+    "(`bilinear_exact=True, obbt=True`)\n\n"
+    "The rigorous-certification configuration.  Two changes over 4d:\n\n"
+    "1. **`bilinear_exact=True`** — write the flow dual term as the TRUE product "
+    "`b·μ` (a non-convex MIQCP, Gurobi `NonConvex=2`) instead of a McCormick "
+    "envelope.  No relaxation gap ⇒ `_diagnose_stall` inflation = 0.\n"
+    "2. **`obbt=True`** — root OBBT tightens each free `μ_p/μ_m` upper bound AND the "
+    "shared `b[ell]` bounds (UB+LB) via McCormick-LP-relaxation auxiliary LPs "
+    "(provably valid; cannot exclude any exact-feasible point).  This shrinks the "
+    "spatial-B&B box on `b·μ` — including its MAIN branching variable `b[ell]` — and "
+    "is what makes the exact MIQCP tractable (IEEE 39's fixed-`b` check went from "
+    "not-finishing to seconds).  The `b[ell]` tightening (b-OBBT, 2026-06-03) roughly "
+    "halves the time-to-LB on IEEE 14 and took IEEE 57 from 3.91% to ~1.5%.\n\n"
+    "Also: **`master_mip_focus=3`** (bound-focused) — once a warm-start incumbent "
+    "exists, focusing Gurobi on `ObjBound` raises the LB faster (the binding lever "
+    "for IEEE 14/57, where the exact MIQCP solve, not the relaxation, is the limit). "
+    "**`seed_patterns=True`** gives root OBBT patterns to tighten.\n\n"
+    "**`seed_interp` (Strategy 4, pattern diversification, 2026-06-01):** also seed "
+    "plain-optima at interior points `b0 + α(bU−b0)` (`α = k/(seed_interp+1)`), not "
+    "just the three corners.  This is the fix for the *missing-pattern* stall, where "
+    "the exact master solves to optimality but its optimum `b_k` isn't a strict CE "
+    "because a corner-only cut set is too thin.  **This certifies IEEE 39 at 0.00%** "
+    "(the interior seeds supply the missing patterns; `b_k → 0.7060`, a strict CE "
+    "that also beats B&S 0.7138).  Per-grid behaviour differs: IEEE 39 = "
+    "missing-pattern (interior seeds help); IEEE 57 = interior seeds DEDUPE "
+    "(plain-optimal is ~constant along the b-path) so it's a pure master-scaling "
+    "problem; IEEE 14 = interior seeds add patterns but the bigger MIQCP then "
+    "undersolves, so a lean master is better.\n\n"
+    "**Strict-CE discipline (2026-05-31):** `best_F`, the `F≤F_hint` cap, and the "
+    "warm-start hint are refreshed only on a *strict* CE (`v_foil−v_plain ≤ "
+    "eps_ce_strict`).  A tolerant-but-not-strict `b_k` (missing pattern) is reported "
+    "but not used to refresh state, so the exact-cut warm start stays feasible and "
+    "the cap can't drop below the true strict optimum.  The reported `F_opt` is a "
+    "genuine strict CE; the LB lower-bounds the minimal strict CE (no false "
+    "certification).\n\n"
+    "The reported `master_LB` is the **running max of ObjBound across iterations** — "
+    "each iteration's master is a relaxation of the full problem so its ObjBound is a "
+    "valid LB on F*, and since the exact MIQCP is non-monotone under a time limit (a "
+    "bigger later master can prove a weaker bound in the same budget), taking the max "
+    "never discards a better proven bound.\n\n"
+    "**Expected:** IEEE 39 **certifies** (gap 0.00%, `term=certified_optimal`, "
+    "F=0.7060 strict — better than B&S 0.7138).  IEEE 14/57 do not yet certify — the "
+    "exact MIQCP master is the bottleneck (LB rises with `MIPFocus=3` + time, but a "
+    "bigger pattern set undersolves under a fixed budget, so we keep them lean). "
+    "IEEE 14 is the hardest: even a lean 3-pattern master stays at a ~28% internal "
+    "Gurobi gap after 1800s, and the LB climbs only slowly with time (0.94→1.58→1.68 "
+    "for 120s→900s→1800s) — diminishing returns, so the genuine next lever is "
+    "**per-node OBBT** (tighten μ inside the B&B tree, not just at the root), not more "
+    "wall-clock.  All LBs are VALID and strict.  Results in `res_14_obbt`, "
+    "`res_39_obbt`, `res_57_obbt`.  See `DECOMP_state.md` (\"Root OBBT\", \"Master-MIP "
+    "scaling is the lever\", \"Enriched seeding CERTIFIES IEEE 39\")."
+))
+cells.append(md("### 4g.1 · IEEE 14-bus — exact + OBBT (lean master, MIPFocus=3) — master-scaling-bound"))
+cells.append(decomp_cell("14", big_M_mult=1.0, time_limit=900,
+                          master_out=1, max_iter=4, suffix="_obbt",
+                          comp_mode="strongdual", seed_patterns=True,
+                          bilinear_exact=True, obbt=True, master_mip_focus=3,
+                          seed_interp=0))
+cells.append(md("### 4g.2 · IEEE 39-bus — exact + OBBT + interior seeds — **CERTIFIES 0.00%**"))
+cells.append(decomp_cell("39", big_M_mult=1.0, time_limit=900,
+                          master_out=1, max_iter=6, suffix="_obbt",
+                          comp_mode="strongdual", seed_patterns=True,
+                          bilinear_exact=True, obbt=True, master_mip_focus=3,
+                          seed_interp=3))
+cells.append(md("### 4g.3 · IEEE 57-bus — exact + OBBT (lean master, MIPFocus=3) — master-scaling-bound"))
+cells.append(decomp_cell("57", big_M_mult=1.0, time_limit=900,
+                          master_out=1, max_iter=4, suffix="_obbt",
+                          comp_mode="strongdual", seed_patterns=True,
+                          bilinear_exact=True, obbt=True, master_mip_focus=3,
+                          seed_interp=0))
+cells.append(md(
+    "### 4g.4 · Final comparison (strongdual K=1 vs exact+OBBT)\n"
+    "`F_opt / LB / gap%` per grid.  exact+OBBT should show inflation 0 in the "
+    "`[STALL]` lines (where reached), a higher/tighter `master_LB`, and IEEE 39 "
+    "certified.  Both VALID (LB ≤ F_opt)."
+))
+cells.append(code(
+    "def _fmt(r):\n"
+    "    if r is None or not r.get('success'):\n"
+    "        return f\"{'N/A':>9} {'N/A':>9} {'N/A':>7}\"\n"
+    "    return f\"{r['F_opt']:>9.4f} {r['master_LB']:>9.4f} {r['gap_pct']:>6.2f}%\"\n"
+    "\n"
+    "hdr = f\"{'F_opt':>9} {'LB':>9} {'gap%':>7}\"\n"
+    "print(f\"{'':<13} | {'== strongdual K=1 ==':^27} | {'== exact + OBBT ==':^27}\")\n"
+    "print(f\"{'Grid':<13} | {hdr} | {hdr}\")\n"
+    "print('-' * 71)\n"
+    "for label, g in [('IEEE 14-bus', '14'), ('IEEE 39-bus', '39'), ('IEEE 57-bus', '57')]:\n"
+    "    r_sd = globals().get(f'res_{g}_sd')\n"
+    "    r_ob = globals().get(f'res_{g}_obbt')\n"
+    "    print(f'{label:<13} | {_fmt(r_sd)} | {_fmt(r_ob)}')\n"
 ))
 
 # Results header
-cells.append(md("---\n## Section 5 · Results summary"))
-
-# Summary table
-cells.append(code(
-    'print(f"{chr(34)*0}{\"Grid\":<14} {\"F_opt\":>10} {\"Iters\":>7} {\"Certified\":>11} {\"Gap%\":>8} {\"Patterns\":>10}")\n'
-    'print("-" * 64)\n'
-    'for label, res in [("IEEE 14-bus", res_14), ("IEEE 39-bus", res_39), ("IEEE 57-bus", res_57)]:\n'
-    '    cert = "YES" if res["certified"] else "NO"\n'
-    '    Fopt = f"{res[\'F_opt\']:.4f}" if res["success"] else "N/A"\n'
-    '    gapc = f"{res[\'gap_pct\']:.2f}%" if res["success"] else "N/A"\n'
-    '    print(f"{label:<14} {Fopt:>10} {res[\'iterations\']:>7} {cert:>11} {gapc:>8} {res[\'seen_patterns\']:>10}")\n'
+cells.append(md(
+    "---\n## Section 5 · Results summary\n\n"
+    "The headline numbers are the **rigorous exact + OBBT certificates** (Section 4g, "
+    "`res_<g>_obbt`): a *strict* CE as the upper bound and a VALID lower bound. "
+    "`bigM` (Section 4b, `res_<g>`) is shown alongside for the incumbent-quality "
+    "comparison, but its `LB=0` makes its gap meaningless as a certificate."
 ))
 
-# CE verification
+# Summary table — headline = exact+OBBT (4g), with bigM incumbent alongside
 cells.append(code(
-    'print("\\nCE verification (v_foil <= v_plain + eps):")\n'
+    "def _g(res):\n"
+    "    if res is None or not res.get('success'):\n"
+    "        return ('N/A','N/A','N/A','N/A')\n"
+    "    cert = 'YES' if res.get('certified') else 'NO'\n"
+    "    return (f\"{res['F_opt']:.4f}\", f\"{res['master_LB']:.4f}\",\n"
+    "            f\"{res['gap_pct']:.2f}%\", cert)\n"
+    "\n"
+    "print('Headline: exact + OBBT (Section 4g) — strict CE + VALID LB')\n"
+    "print(f\"{'Grid':<13} {'F_opt(UB)':>11} {'LB':>10} {'Gap%':>9} {'Certified':>11}  | {'bigM F':>9}\")\n"
+    "print('-' * 74)\n"
+    "for label, g in [('IEEE 14-bus','14'), ('IEEE 39-bus','39'), ('IEEE 57-bus','57')]:\n"
+    "    ro = globals().get(f'res_{g}_obbt'); rb = globals().get(f'res_{g}')\n"
+    "    F,LB,gp,ct = _g(ro)\n"
+    "    bF = f\"{rb['F_opt']:.4f}\" if (rb and rb.get('success')) else 'N/A'\n"
+    "    print(f\"{label:<13} {F:>11} {LB:>10} {gp:>9} {ct:>11}  | {bF:>9}\")\n"
+))
+
+# CE verification (on the rigorous exact+OBBT incumbent)
+cells.append(code(
+    'print("\\nStrict-CE verification of the exact+OBBT incumbent (v_foil <= v_plain + eps):")\n'
     'EPS = 1e-3\n'
     'for label, res, oracle in [\n'
-    '    ("IEEE 14-bus", res_14, oracle_14),\n'
-    '    ("IEEE 39-bus", res_39, oracle_39),\n'
-    '    ("IEEE 57-bus", res_57, oracle_57),\n'
+    '    ("IEEE 14-bus", res_14_obbt, oracle_14),\n'
+    '    ("IEEE 39-bus", res_39_obbt, oracle_39),\n'
+    '    ("IEEE 57-bus", res_57_obbt, oracle_57),\n'
     ']:\n'
     '    if not res["success"]:\n'
     '        print(f"  {label}: no CE found"); continue\n'

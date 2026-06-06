@@ -91,8 +91,27 @@ class UCDecomp4b:
         master_time_limit: Optional[float] = None,  # seconds per master MILP solve
         master_output_flag: int = 0,   # 1 to print Gurobi log for every master solve
         master_mip_gap: float = 1e-4,  # relative MIP gap tolerance
-        comp_mode: str = "sos1",  # complementarity mode: "bigM" | "indicator" | "sos1"
+        comp_mode: str = "sos1",  # complementarity mode: "bigM" | "indicator" | "sos1" | "hybrid" | "strongdual"
         b_hat_hint: Optional[np.ndarray] = None,  # known CE (e.g. from B&S) to warm-start each master
+        seed_patterns: bool = False,  # seed KKT blocks for plain-optima at {b0, b_hat, bU} before loop
+        mccormick_mu_factor: Optional[float] = None,  # strongdual: tighten McCormick mu-box to factor*max(observed mu); None = provable M_mu
+        mccormick_segments: int = 1,  # strongdual: K piecewise-McCormick segments on b (1 = single envelope)
+        bilinear_exact: bool = False,  # strongdual (Fix 3): write b·μ as the exact product and solve the master as a non-convex MIQCP (Gurobi NonConvex=2) — exact valid LB, no McCormick gap
+        obbt: bool = False,        # strongdual+bilinear_exact: root OBBT on μ_p/μ_m bounds for free lines (provably valid LB lever — see DECOMP_OBBT_offload.md)
+        obbt_safety: float = 1e-6, # additive+relative safety margin on OBBT-tightened μ UBs
+        obbt_iter: int = 1,        # number of root OBBT passes. DEFAULT 1: the 2nd+ pass (iterated/sequential re-tightening) can numerically push a μ UB below the strong-duality dual value at a known CE and produce an INVALID LB (deterministically excluded b_BS on IEEE 39 at iter=2). A per-pass self-validation guard (see _obbt_root) now rolls back any pass that would exclude the hint CE, so iter>1 is safe-but-capped; 1 is the conservative default.
+        eps_ce_strict: float = 1.0,  # absolute CE gap (v_foil-v_plain) below which b_k is a STRICT CE — gates best_F/F-cap/warm-start refresh (exact master). Loose tolerant CEs (≤ EPS_REL_CE·|vp|) are NOT used to refresh state (would break exact-cut warm starts). See DECOMP_state.md "strict vs tolerant CE".
+        master_mip_focus: int = 1,   # Gurobi MIPFocus for the master solve: 1=find incumbents (default), 3=focus on ObjBound (raise the LB; use when a warm-start incumbent already exists and the LB is the bottleneck, e.g. exact MIQCP on IEEE 14/57)
+        seed_interp: int = 0,        # with seed_patterns: also seed plain-optima at this many INTERIOR points b0+α(bU−b0), α=k/(seed_interp+1). Enriches the cut set along the b-path so the master optimum can't sit at a non-CE between corner patterns (Strategy 4: pattern diversification — for the "missing pattern" stall on IEEE 39/14). 0 = corners {b0,b_hat,bU} only.
+        master_seed: Optional[int] = None,   # Gurobi Seed for the master solve (reproducibility). None = Gurobi default.
+        master_threads: Optional[int] = None,  # Gurobi Threads for the master solve (HPC). None = all cores.
+        master_multistart: int = 1,  # solve each per-iteration master with this many Gurobi seeds, keep the MAX ObjBound (valid LB) — beats NonConvex-MIQCP bound variance; >1 only re-solves when the first solve hits the time limit (no variance to exploit if OPTIMAL). HPC-parallelizable.
+        obbt_refresh: bool = False,  # re-run root OBBT after best_F (the F≤F_hint cap) tightens to a better strict CE — the tighter cap shrinks the b/μ bounds further (iterated OBBT).
+        node_obbt: bool = False,     # STANDARDIZED solver: replace the single-MIQCP master solve with an explicit spatial branch-and-bound over the shared b-box, running OBBT at every box (Strategy 5 "per-node OBBT"). Gurobi's callbacks cannot tighten node-local bounds, so we drive the spatial tree ourselves and call Gurobi only to BOUND each box. Valid: global_LB = min over an exhaustive b-box partition of each box's Gurobi ObjBound. Boxes are independent → HPC-parallelizable. Requires comp_mode='strongdual' + bilinear_exact + obbt.
+        node_obbt_budget: float = 90.0,    # per-box master MIQCP time limit (s)
+        node_obbt_max_nodes: int = 16,     # max boxes to PROCESS before stopping (budget cap); the reported LB stays valid at any stop
+        node_obbt_tol: Optional[float] = None,  # spatial-B&B gap tolerance (global_UB − global_LB); None ⇒ eps_obj
+        node_obbt_per_box: bool = False,   # re-run the full OBBT μ-sweep at every box. Default OFF: a single-dimension b-split barely changes the achievable μ-max (μ[ell',t] depends on b[ell'], not the split line), so per-box OBBT tightens ~0 — measured on IEEE 14. The root μ.UB is already valid for any sub-box (sub-box ⊆ root ⇒ root μ.UB ≥ max over sub-box), so per box we keep root μ and only tighten b. Set True only to experiment with multi-dim deep splits.
     ):
         self.oracle   = oracle
         self.data     = data
@@ -112,10 +131,10 @@ class UCDecomp4b:
         self.master_time_limit  = float(master_time_limit) if master_time_limit is not None else None
         self.master_output_flag = int(master_output_flag)
         self.master_mip_gap     = float(master_mip_gap)
-        if comp_mode not in ("bigM", "indicator", "sos1", "hybrid"):
+        if comp_mode not in ("bigM", "indicator", "sos1", "hybrid", "strongdual"):
             raise ValueError(
-                f"comp_mode must be 'bigM', 'indicator', 'sos1', or 'hybrid'; "
-                f"got {comp_mode!r}"
+                f"comp_mode must be 'bigM', 'indicator', 'sos1', 'hybrid', or "
+                f"'strongdual'; got {comp_mode!r}"
             )
         self.comp_mode = comp_mode
 
@@ -137,6 +156,54 @@ class UCDecomp4b:
         self._keepalive = _GurobiKeepAlive(interval=keepalive_interval)
 
         self.b_hat_hint  = np.array(b_hat_hint, dtype=float) if b_hat_hint is not None else None
+        self.seed_patterns = bool(seed_patterns)
+        self.mccormick_mu_factor = (float(mccormick_mu_factor)
+                                    if mccormick_mu_factor is not None else None)
+        # Tightened McCormick mu-box (single global value) for strongdual mode.
+        # None ⇒ _add_iteration_block falls back to the provable M_mu floor.
+        # Set by _estimate_mu_box() when mccormick_mu_factor is given.
+        self._mu_box: Optional[float] = None
+        self.mccormick_segments = max(1, int(mccormick_segments))
+        self.bilinear_exact = bool(bilinear_exact)
+        self.obbt          = bool(obbt)
+        self.obbt_safety   = float(obbt_safety)
+        self.obbt_iter     = max(1, int(obbt_iter))
+        self.eps_ce_strict = float(eps_ce_strict)
+        self.master_mip_focus = int(master_mip_focus)
+        self.seed_interp = max(0, int(seed_interp))
+        self.master_seed       = master_seed
+        self.master_threads    = master_threads
+        self.master_multistart = max(1, int(master_multistart))
+        self.obbt_refresh      = bool(obbt_refresh)
+
+        # ---- Node-OBBT (standardized spatial-B&B-over-b solver) ----------
+        self.node_obbt           = bool(node_obbt)
+        self.node_obbt_budget    = float(node_obbt_budget)
+        self.node_obbt_max_nodes = max(1, int(node_obbt_max_nodes))
+        self.node_obbt_tol       = (float(node_obbt_tol)
+                                    if node_obbt_tol is not None else None)
+        self.node_obbt_per_box   = bool(node_obbt_per_box)
+        if self.node_obbt:
+            # Node-OBBT only makes sense on the exact-bilinear strongdual master
+            # (it tightens μ/b per box to sharpen Gurobi's spatial relaxation of
+            # b·μ) and needs the OBBT machinery.  Auto-enable the prerequisites
+            # rather than fail, with a warning, so a single switch standardizes
+            # the pipeline across grids.
+            if self.comp_mode != "strongdual":
+                raise ValueError(
+                    "node_obbt requires comp_mode='strongdual' (it operates on "
+                    "the strong-duality master's flow duals μ_p/μ_m)."
+                )
+            if not self.bilinear_exact:
+                self.bilinear_exact = True
+                if self.verbose:
+                    print("[DECOMP] node_obbt=True ⇒ enabling bilinear_exact "
+                          "(exact b·μ; spatial B&B is the point of node OBBT).")
+            if not self.obbt:
+                self.obbt = True
+                if self.verbose:
+                    print("[DECOMP] node_obbt=True ⇒ enabling obbt "
+                          "(per-box OBBT reuses the root-OBBT machinery).")
 
         self.best_F      = float("inf")
         self.best_b      = None
@@ -433,9 +500,40 @@ class UCDecomp4b:
                         for ell in self.free),
             GRB.MINIMIZE,
         )
+
+        # Piecewise-McCormick segment structure on the shared b[ell] (strongdual,
+        # K>1).  GLOBAL per free line — segment binaries are nFree×K total (b is
+        # one variable per line, shared across time/patterns).  Partition
+        # [bL,bU] into K segments; b[ell] = Σ_k bseg[ell,k] with exactly one
+        # active segment.  _add_iteration_block uses the active segment's tighter
+        # [β_k, β_{k+1}] bounds in the per-segment McCormick envelope.
+        bdelta: Dict = {}
+        bseg:   Dict = {}
+        breaks: Dict = {}
+        K = self.mccormick_segments
+        if self.comp_mode == "strongdual" and K > 1:
+            for ell in self.free:
+                bLe, bUe = float(self.bL[ell]), float(self.bU[ell])
+                beta = [bLe + (bUe - bLe) * k / K for k in range(K + 1)]
+                breaks[ell] = beta
+                d_k, s_k = [], []
+                for k in range(K):
+                    d = m.addVar(vtype=GRB.BINARY, name=f"bdelta[{ell},{k}]")
+                    sgv = m.addVar(lb=0.0, name=f"bseg[{ell},{k}]")
+                    # bseg nonzero only in the active segment, within [β_k, β_{k+1}]
+                    m.addConstr(sgv >= beta[k]     * d, name=f"bseg_lo[{ell},{k}]")
+                    m.addConstr(sgv <= beta[k + 1] * d, name=f"bseg_hi[{ell},{k}]")
+                    d_k.append(d); s_k.append(sgv)
+                m.addConstr(gp.quicksum(d_k) == 1, name=f"bdelta_sum[{ell}]")
+                m.addConstr(b_vars[ell] == gp.quicksum(s_k), name=f"bseg_link[{ell}]")
+                bdelta[ell] = d_k
+                bseg[ell]   = s_k
+
         m.update()
 
-        master_vars = {"var": var, "b": b_vars, "bp": bp, "bm": bm, "sos_pairs": []}
+        master_vars = {"var": var, "b": b_vars, "bp": bp, "bm": bm,
+                       "sos_pairs": [], "bdelta": bdelta, "bseg": bseg,
+                       "breaks": breaks}
         return m, master_vars
 
     # ------------------------------------------------------------------
@@ -717,8 +815,14 @@ class UCDecomp4b:
                        enforces via B&B branching (NOT linearised internally
                        with big-M), so they don't loosen the LP relaxation.
                        See DECOMP_lb_stagnation.md Fix 1.
+            strongdual: no per-pair encoding — complementarity is replaced
+                       globally by one strong-duality equality plus McCormick
+                       envelopes on the bilinear flow terms (built after the
+                       optimality cut below).  See DECOMP_lb_stagnation.md Fix 2.
             """
             mode = self.comp_mode
+            if mode == "strongdual":
+                return  # handled by the strong-duality block after the opt cut
             if mode == "hybrid":
                 mode = "bigM" if is_bilinear else "indicator"
 
@@ -853,6 +957,130 @@ class UCDecomp4b:
                 lp_var.add(curt_j[r, t], float(cvec[idx.curt[r, t]]))
 
         m.addConstr(foil_cost <= lp_var + lp_const, name=f"opt_cut{s}")
+
+        # ---- Strong-duality reformulation (comp_mode="strongdual") ----------
+        # Replaces ALL complementarity with one equality  c^T x^j = dual_obj,
+        # combined with the primal feasibility + stationarity already added.
+        # For an LP, {primal feas, dual feas (=stationarity), strong duality}
+        # ⟺ optimality, so no z binaries are needed.  The only nonlinearity is
+        # the dual term  −Σ b[ell]·(μ_p+μ_m)  on FREE lines (b is a master var);
+        # we linearise b·μ with McCormick auxiliaries w (= b·μ).  Fixed lines
+        # have constant cap=b0 so their term stays linear.
+        # dual_obj verified == c^T x* on IEEE 14 (see _verify_strongdual.py).
+        if self.comp_mode == "strongdual":
+            # mu box for McCormick: μ ∈ [0, M_box].  Default M_box = M_mu (the
+            # provable flow-dual bound, Bug 9) — safe but loose (observed μ is
+            # 16-81× smaller, so the envelope is slack).  If a tightened box was
+            # estimated (_estimate_mu_box, Technique 3 / Option A) use it instead
+            # — HEURISTIC, must be re-validated at known CEs (debug_fix_b).
+            M_box = self._mu_box if self._mu_box is not None else M_mu
+            K_seg = self.mccormick_segments
+            use_pw = (K_seg > 1) and bool(master_vars.get("bseg"))
+            # Fix 3: exact bilinear b·μ via a non-convex MIQCP (Gurobi spatial
+            # B&B).  No McCormick/piecewise relaxation ⇒ no inflation ⇒ exact
+            # valid LB.  Requires finite μ bounds (set via .UB = M_box) and
+            # NonConvex=2 on the model (set below once the quad constraint exists).
+            exact = bool(self.bilinear_exact)
+
+            def _flow_w(dv, ell, t, tag):
+                """Build w (= b[ell]·dv) via McCormick; return list of w vars to
+                subtract in dual_obj.  Single-envelope when K=1; disaggregated
+                piecewise (per b-segment) when K>1 — the latter also links
+                dv = Σ_k μseg_k so the dual var stays consistent with stationarity.
+                """
+                bLe = float(self.bL[ell]); bUe = float(self.bU[ell])
+                bvar = b_vars[ell]
+                if not use_pw:
+                    wv = m.addVar(lb=0.0, name=f"{tag}{s}[{ell},{t}]")
+                    m.addConstr(wv >= bLe * dv)
+                    m.addConstr(wv >= bUe * dv + M_box * bvar - bUe * M_box)
+                    m.addConstr(wv <= bUe * dv)
+                    m.addConstr(wv <= bLe * dv + M_box * bvar - bLe * M_box)
+                    return [wv]
+                beta = master_vars["breaks"][ell]
+                d_k  = master_vars["bdelta"][ell]
+                bs_k = master_vars["bseg"][ell]
+                museg, wseg = [], []
+                for k in range(K_seg):
+                    ms = m.addVar(lb=0.0, name=f"{tag}_ms{s}[{ell},{t},{k}]")
+                    wv = m.addVar(lb=0.0, name=f"{tag}_w{s}[{ell},{t},{k}]")
+                    m.addConstr(ms <= M_box * d_k[k])               # μseg active only in segment k
+                    # per-segment McCormick: wv = bseg·ms, b∈[β_k,β_{k+1}], μ∈[0,M_box]
+                    m.addConstr(wv >= beta[k]     * ms)
+                    m.addConstr(wv >= beta[k + 1] * ms + M_box * bs_k[k] - beta[k + 1] * M_box * d_k[k])
+                    m.addConstr(wv <= beta[k + 1] * ms)
+                    m.addConstr(wv <= beta[k]     * ms + M_box * bs_k[k] - beta[k]     * M_box * d_k[k])
+                    museg.append(ms); wseg.append(wv)
+                m.addConstr(dv == gp.quicksum(museg), name=f"{tag}_link{s}[{ell},{t}]")
+                return wseg
+
+            sd = gp.QuadExpr() if exact else gp.LinExpr()
+            # Generator bounds:  −Pmax·u·λ_hi + Pmin·u·λ_lo
+            for g, gen in enumerate(data.gens):
+                Pmin, Pmax = float(gen.Pmin), float(gen.Pmax)
+                for t in range(T):
+                    uj = float(u_j[g, t])
+                    sd.add(lam_hi[g, t], -Pmax * uj)
+                    sd.add(lam_lo[g, t],  Pmin * uj)
+            # Ramp limits
+            for g, gen in enumerate(data.gens):
+                RU, RD = float(gen.RU), float(gen.RD)
+                p0g = float(p_init[g])
+                sd.add(rho_up_i[g], -p0g - RU)
+                sd.add(rho_dn_i[g],  p0g - RD)
+                for t in range(1, T):
+                    sd.add(rho_up[g, t], -RU)
+                    sd.add(rho_dn[g, t], -RD)
+            # Nodal balance:  π·(Σ_ren avail − demand)
+            for b in range(nB):
+                for t in range(T):
+                    avail_sum = sum(float(data.rens[r].avail[t])
+                                    for r in rens_at_bus[b])
+                    sd.add(pi_j[b, t], avail_sum - float(data.demand[b, t]))
+            # Flow limits:  −cap·(μ_p+μ_m); free lines use McCormick w = b·μ
+            # (single envelope, or disaggregated piecewise when K>1).
+            for ell in range(nL):
+                if ell in free_set:
+                    for t in range(T):
+                        mu_p[ell, t].UB = M_box
+                        mu_m[ell, t].UB = M_box
+                        if exact:
+                            # exact bilinear: dual_obj gets −b[ell]·(μ_p+μ_m)
+                            sd += -b_vars[ell] * mu_p[ell, t]
+                            sd += -b_vars[ell] * mu_m[ell, t]
+                        else:
+                            for wv in _flow_w(mu_p[ell, t], ell, t, "wmup"):
+                                sd.add(wv, -1.0)
+                            for wv in _flow_w(mu_m[ell, t], ell, t, "wmum"):
+                                sd.add(wv, -1.0)
+                else:
+                    cap = float(b0[ell])
+                    for t in range(T):
+                        sd.add(mu_p[ell, t], -cap)
+                        sd.add(mu_m[ell, t], -cap)
+            # Shed / curt / shift upper bounds:  −rhs·dual
+            for b in range(nB):
+                for t in range(T):
+                    sd.add(gsh_ub[b, t], -float(data.demand[b, t]))
+                    sd.add(gsp_ub[b, t], -float(data.Splus_max[b, t]))
+                    sd.add(gsm_ub[b, t], -float(data.Sminus_max[b, t]))
+            for r in range(nR):
+                for t in range(T):
+                    sd.add(gcu_ub[r, t], -float(data.rens[r].avail[t]))
+            # Strong-duality equality for the DISPATCH LP:  lp_var == dual_obj.
+            # NOTE: only `lp_var` (the dispatch variable cost: p/shed/curt/sp/sm)
+            # appears — NOT lp_const.  lp_const is the commitment cost (u,v,w),
+            # which is a constant of the dispatch LP, not part of its objective,
+            # so it is absent from both the primal value and the dual objective.
+            # (The optimality cut above correctly uses lp_var+lp_const because it
+            #  compares the FULL foil cost to the FULL dispatch cost.)
+            m.addConstr(lp_var == sd, name=f"strongdual{s}")
+            if exact:
+                # Quadratic (bilinear) constraint ⇒ non-convex MIQCP.  Set here so
+                # ANY solve of this master (run, debug_fix_b, ...) is configured
+                # correctly regardless of caller.
+                m.Params.NonConvex = 2
+
         m.update()
 
     # ------------------------------------------------------------------
@@ -1425,6 +1653,389 @@ class UCDecomp4b:
             "obj": obj_val,
         }
 
+    def _estimate_mu_box(
+        self,
+        b_seeds: List[np.ndarray],
+        window_size: int,
+        per_bus_neutrality: bool,
+        p_init: np.ndarray,
+    ) -> Optional[float]:
+        """Heuristic McCormick mu-box for strongdual (Technique 3, Option A).
+
+        Solves the dispatch LP at each seed b (with its plain-optimal pattern)
+        and returns  factor * max observed |mu_p|,|mu_m| over free lines & seeds.
+
+        WARNING: this is a HEURISTIC bound, not a provable one — the true optimal
+        flow dual at some other b in [bL,bU] may exceed the observed maximum.  If
+        the box is set below the true mu, the McCormick envelope excludes valid
+        solutions and the LB becomes INVALID (too high).  ALWAYS re-validate with
+        _check_strongdual_valid.py (debug_fix_b at a known CE) after changing the
+        factor.  See DECOMP_lb_stagnation.md / DECOMP_state.md.
+        """
+        if self.mccormick_mu_factor is None:
+            return None
+        nL = len(self.data.lines)
+        free = self.free
+        obs = 0.0
+        for b_seed in b_seeds:
+            if b_seed is None:
+                continue
+            vp, _, sp = self.oracle.solve_plain(b_seed)
+            if sp is None:
+                continue
+            u_j = np.round(sp["u"]).astype(int)
+            sol = self._solve_dispatch_lp(
+                b_seed, u_j, window_size, per_bus_neutrality, p_init)
+            if sol is None:
+                continue
+            if free:
+                obs = max(obs, float(np.max(sol["mu_p"][free])),
+                          float(np.max(sol["mu_m"][free])))
+        box = self.mccormick_mu_factor * max(obs, 1.0)
+        self._mu_box = box
+        if self.verbose:
+            print(f"[DECOMP] McCormick mu-box = {box:.2f} "
+                  f"(factor {self.mccormick_mu_factor} × observed max {obs:.2f})")
+        return box
+
+    def _obbt_root(
+        self,
+        m: gp.Model,
+        master_vars: Dict,
+        patterns: List[np.ndarray],
+        window_size: int,
+        per_bus_neutrality: bool,
+        u_init: np.ndarray,
+        p_init: np.ndarray,
+        on_time_init: np.ndarray,
+        off_time_init: np.ndarray,
+        sync_bounds_from_m: bool = False,
+    ) -> Dict:
+        """Root OBBT on flow duals μ_p/μ_m for free lines (Strategy 1).
+
+        Builds a McCormick LP relaxation R of the (exact-bilinear) master m and,
+        for each free (ell, t) and each pattern j currently in m, solves
+            max μ_p[j,ell,t]   s.t.   R       and   max μ_m[j,ell,t]   s.t.   R
+        to derive provably valid UBs.  When the OBBT UB improves on the current
+        μ.UB in m, the bound is tightened (cannot exclude any exact-feasible
+        point of m — see DECOMP_OBBT_offload.md §4).
+
+        Tighter μ UBs shrink Gurobi's spatial branch-and-bound box on the
+        non-convex `b·μ` constraint (`bilinear_exact=True`), which is the
+        intended speedup.  No-op for comp_mode != 'strongdual' or when no
+        KKT block has been added yet.
+        """
+        if not self.obbt:
+            return {"tightened": 0, "solved": 0, "shrink": 0.0}
+        if self.comp_mode != "strongdual":
+            if self.verbose:
+                print("[OBBT] comp_mode != 'strongdual' — OBBT not applicable; "
+                      "skipping.")
+            return {"tightened": 0, "solved": 0, "shrink": 0.0}
+        if not patterns:
+            if self.verbose:
+                print("[OBBT] No KKT blocks present — root OBBT has nothing to "
+                      "tighten. (Did you forget seed_patterns=True?)")
+            return {"tightened": 0, "solved": 0, "shrink": 0.0}
+
+        T = int(self.data.T)
+        if self.verbose:
+            print(f"[OBBT] Building McCormick LP relaxation R "
+                  f"({len(patterns)} pattern(s), {len(self.free)} free lines, "
+                  f"T={T}) ...")
+
+        # Build R with the same comp_mode but bilinear_exact=False so the dual
+        # objective uses the McCormick envelope (linear) instead of the exact
+        # product (non-convex).  S_exact ⊆ S_R: every (b,μ) satisfying the
+        # exact constraint also satisfies the McCormick envelope (the envelope
+        # contains the exact bilinear surface).  Integrality relaxation below
+        # only widens R further; max over R ≥ max over S_exact.  Validity ✓.
+        saved_exact = self.bilinear_exact
+        self.bilinear_exact = False
+        try:
+            R, rv = self._build_master_base(
+                window_size, per_bus_neutrality,
+                u_init, p_init, on_time_init, off_time_init,
+            )
+            # Mirror the F ≤ F_hint bound from m (if present) so R inherits the
+            # same feasibility region the master will explore.
+            try:
+                c_hint = m.getConstrByName("_hint_F_ub")
+                if c_hint is not None:
+                    R.addConstr(
+                        gp.quicksum(
+                            float(self.w[ell]) * (rv["bp"][ell] + rv["bm"][ell])
+                            for ell in self.free
+                        ) <= float(c_hint.RHS),
+                        name="_hint_F_ub",
+                    )
+            except Exception as _e:
+                if self.verbose:
+                    print(f"[OBBT] hint UB mirror failed: {_e}")
+            # Add the same KKT blocks in the same order so name suffixes _j align.
+            for j_idx, u_j in enumerate(patterns):
+                self._add_iteration_block(
+                    R, rv, j_idx, u_j, u_init, p_init,
+                    window_size, per_bus_neutrality,
+                )
+            R.update()
+        finally:
+            self.bilinear_exact = saved_exact
+
+        # Relax integrality (drops u_foil binary + segment binaries) — still a
+        # valid relaxation (any exact-feasible integer point is also fractional-
+        # feasible).  Disable NonConvex (no quadratic constraint exists in R
+        # by construction, but be defensive).
+        R_lp = R.relax()
+        R_lp.Params.OutputFlag   = 0
+        R_lp.Params.NonConvex    = 0
+        R_lp.Params.NumericFocus = 2
+        R_lp.Params.TimeLimit    = 30.0    # safety per LP solve
+
+        # --- Node-OBBT: inherit m's CURRENT (boxed) b/μ bounds into R --------
+        # Root OBBT builds R at the original [bL,bU] / M_box bounds.  When called
+        # from the spatial B&B driver, m's b[ell] has been restricted to a node
+        # box (and μ may already be tightened); R must respect that box so the
+        # max-μ / min/max-b LPs are taken OVER THE BOX, yielding the sharper
+        # node-local bounds that are the whole point of per-node OBBT.  Copying
+        # m's bounds onto the relaxation keeps it a valid relaxation of the
+        # boxed master (S_exact(box) ⊆ S_R(box)).
+        if sync_bounds_from_m:
+            for ell in self.free:
+                vb_m = m.getVarByName(f"b[{ell}]")
+                vb_R = R_lp.getVarByName(f"b[{ell}]")
+                if vb_m is not None and vb_R is not None:
+                    vb_R.LB = float(vb_m.LB)
+                    vb_R.UB = float(vb_m.UB)
+            for j_idx in range(len(patterns)):
+                s = f"_{j_idx}"
+                for ell in self.free:
+                    for t in range(T):
+                        for tag in ("mup", "mum"):
+                            nm = f"{tag}{s}[{ell},{t}]"
+                            vm = m.getVarByName(nm)
+                            vR = R_lp.getVarByName(nm)
+                            if vm is not None and vR is not None:
+                                vR.UB = float(vm.UB)
+            R_lp.update()
+
+        n_tightened = 0
+        n_solved    = 0
+        total_shrink = 0.0
+        eps_min_improvement = 1e-6 * max(1.0, abs(self.big_M_mu))
+
+        # --- Validity self-guard: never let OBBT exclude the known hint CE ----
+        # OBBT is valid in exact arithmetic, but sequential/iterated tightening
+        # can numerically push a μ UB below the dual value the strong-duality
+        # block needs at a KNOWN CE — silently turning the LB INVALID (observed
+        # on IEEE 39 with obbt_iter=2: the 2nd pass deterministically excluded
+        # b_BS).  We compute the hint CE's exact per-pattern dispatch duals ONCE,
+        # then after each pass assert every tightened μ UB still dominates them
+        # (and b_hint stays within the b-box).  A violating pass is rolled back
+        # and iteration stops — OBBT can then only ever stay conservative.  This
+        # makes OBBT self-validating for unattended HPC runs (no human gate).
+        hint_ref = None
+        if self.b_hat_hint is not None:
+            try:
+                hint_ref = {"b": np.asarray(self.b_hat_hint, float), "mu": {}}
+                for j_idx, u_j in enumerate(patterns):
+                    sol = self._solve_dispatch_lp(
+                        self.b_hat_hint, u_j, window_size,
+                        per_bus_neutrality, p_init,
+                    )
+                    if sol is None:
+                        hint_ref = None
+                        break
+                    hint_ref["mu"][j_idx] = (sol["mu_p"], sol["mu_m"])
+            except Exception as _e:
+                if self.verbose:
+                    print(f"[OBBT] hint-guard precompute failed ({_e}); "
+                          "proceeding without the self-guard.")
+                hint_ref = None
+
+        def _hint_ok() -> bool:
+            """True iff the hint CE (b_hint + its exact duals) is still inside the
+            current m bounds — i.e. OBBT has not excluded a known feasible point."""
+            if hint_ref is None:
+                return True
+            gtol = 1e-6
+            bb = hint_ref["b"]
+            for ell in self.free:
+                vb = m.getVarByName(f"b[{ell}]")
+                if vb is None:
+                    continue
+                if not (float(vb.LB) - gtol <= bb[ell] <= float(vb.UB) + gtol):
+                    return False
+            for j_idx, (mp, mm) in hint_ref["mu"].items():
+                s = f"_{j_idx}"
+                for ell in self.free:
+                    for t in range(T):
+                        vpa = m.getVarByName(f"mup{s}[{ell},{t}]")
+                        if vpa is not None and float(vpa.UB) < float(mp[ell, t]) - gtol:
+                            return False
+                        vma = m.getVarByName(f"mum{s}[{ell},{t}]")
+                        if vma is not None and float(vma.UB) < float(mm[ell, t]) - gtol:
+                            return False
+            return True
+
+        for it in range(self.obbt_iter):
+            if self.verbose:
+                print(f"[OBBT] pass {it + 1}/{self.obbt_iter} ...")
+            pass_tightened = 0
+            pass_shrink    = 0.0
+            pass_solved    = 0
+            # snapshot m's μ/b bounds before this pass (for the self-guard rollback)
+            _pass_snap: Dict[str, tuple] = {}
+            for ell in self.free:
+                vb = m.getVarByName(f"b[{ell}]")
+                if vb is not None:
+                    _pass_snap[f"b[{ell}]"] = (float(vb.LB), float(vb.UB))
+            for _jj in range(len(patterns)):
+                _s = f"_{_jj}"
+                for ell in self.free:
+                    for t in range(T):
+                        for tag in ("mup", "mum"):
+                            nm = f"{tag}{_s}[{ell},{t}]"
+                            vv = m.getVarByName(nm)
+                            if vv is not None:
+                                _pass_snap[nm] = (float(vv.LB), float(vv.UB))
+            for j_idx in range(len(patterns)):
+                s = f"_{j_idx}"
+                for ell in self.free:
+                    for t in range(T):
+                        for tag in ("mup", "mum"):
+                            nm = f"{tag}{s}[{ell},{t}]"
+                            var_R = R_lp.getVarByName(nm)
+                            var_m = m.getVarByName(nm)
+                            if var_R is None or var_m is None:
+                                continue
+                            try:
+                                R_lp.setObjective(var_R, GRB.MAXIMIZE)
+                                R_lp.optimize()
+                            except Exception as _e:
+                                if self.verbose and pass_solved < 3:
+                                    print(f"[OBBT]   solve failed for {nm}: {_e}")
+                                continue
+                            pass_solved += 1
+                            st = R_lp.Status
+                            if st == GRB.OPTIMAL:
+                                obj = float(R_lp.ObjVal)
+                                # GENEROUS relative margin (1e-4·|obj|) so LP
+                                # feasibility noise on the bound-tightening LP —
+                                # large on grids with big μ / M_box (IEEE 39: μ in
+                                # the thousands, M_box≈40010) — can't push the cap
+                                # below the exact dispatch μ at a valid CE.  The
+                                # tiny obbt_safety (1e-6) excluded the known CE
+                                # b_BS on IEEE 39 (caught by _validate_all.py): the
+                                # max-μ LP returned a value a hair under the true
+                                # max, and 1e-6·μ ≈ 2e-3 didn't cover the LP noise.
+                                new_ub = obj + max(1e-4 * (1.0 + abs(obj)),
+                                                   self.obbt_safety)
+                                cur_ub = float(var_m.UB)
+                                if (new_ub < cur_ub - eps_min_improvement
+                                        and new_ub >= 0.0):
+                                    pass_shrink += cur_ub - new_ub
+                                    var_m.UB = new_ub
+                                    # Mirror on R_lp so subsequent OBBT passes
+                                    # use the tighter bound.
+                                    var_R.UB = new_ub
+                                    pass_tightened += 1
+                            elif st == GRB.UNBOUNDED:
+                                # Should never happen for a valid LP relaxation
+                                # of a problem with finite optimum — log and skip.
+                                if self.verbose:
+                                    print(f"[OBBT]   {nm}: LP unbounded — "
+                                          "no UB derived (skip)")
+                            # other statuses: TIME_LIMIT / INF_OR_UNB → skip
+
+            # --- Also tighten the SHARED b[ell] bounds (both UB and LB) --------
+            # b[ell] is the spatial-B&B's MAIN branching variable, so shrinking
+            # its range is the most direct speedup for bilinear_exact.  R carries
+            # the F≤F_hint cap + every optimality cut, so [min,max] of b[ell] over
+            # R bounds its exact-feasible range (any F≤F_hint feasible point — a
+            # superset of the F≤best_F optimum — lies inside).  Valid by the same
+            # relaxation argument as the μ bounds (§4 of DECOMP_OBBT_offload.md).
+            b_pass_tightened = 0
+            for ell in self.free:
+                nm_b = f"b[{ell}]"
+                var_R = R_lp.getVarByName(nm_b)
+                var_m = m.getVarByName(nm_b)
+                if var_R is None or var_m is None:
+                    continue
+                for sense, is_ub in ((GRB.MAXIMIZE, True), (GRB.MINIMIZE, False)):
+                    try:
+                        R_lp.setObjective(var_R, sense)
+                        R_lp.optimize()
+                    except Exception:
+                        continue
+                    pass_solved += 1
+                    if R_lp.Status != GRB.OPTIMAL:
+                        continue
+                    val = float(R_lp.ObjVal)
+                    # GENEROUS relative safety margin (1e-4·|val|, not the tiny
+                    # obbt_safety) so LP feasibility noise on the bound-tightening
+                    # LP — which is large on grids with big coefficients (IEEE 39:
+                    # M_box≈40010, fmax in the thousands → constraint values ~1e7
+                    # → b-noise ~0.01-0.1) — can NEVER push the tightened bound
+                    # past a valid point.  Without it, b-OBBT excluded the known CE
+                    # b_BS on IEEE 39 (caught by _validate_all.py).  The margin
+                    # widens the bound outward, so it only ever makes b-OBBT more
+                    # conservative (slightly less tightening, never invalid).
+                    marg = max(1e-4 * (1.0 + abs(val)), self.obbt_safety)
+                    if is_ub:
+                        new_ub = val + marg
+                        if new_ub < float(var_m.UB) - eps_min_improvement:
+                            pass_shrink += float(var_m.UB) - new_ub
+                            var_m.UB = new_ub; var_R.UB = new_ub
+                            b_pass_tightened += 1
+                    else:
+                        new_lb = val - marg
+                        if new_lb > float(var_m.LB) + eps_min_improvement:
+                            pass_shrink += new_lb - float(var_m.LB)
+                            var_m.LB = new_lb; var_R.LB = new_lb
+                            b_pass_tightened += 1
+            pass_tightened += b_pass_tightened
+            if self.verbose and b_pass_tightened:
+                print(f"[OBBT]   pass {it + 1}: tightened {b_pass_tightened} "
+                      f"b[ell] bound(s)")
+
+            n_tightened += pass_tightened
+            n_solved    += pass_solved
+            total_shrink += pass_shrink
+            if self.verbose:
+                print(f"[OBBT]   pass {it + 1}: solved {pass_solved} LPs, "
+                      f"tightened {pass_tightened} bounds, "
+                      f"shrink {pass_shrink:.4e}")
+            # --- self-guard: roll this pass back if it excluded the hint CE ----
+            if pass_tightened:
+                m.update()
+                if not _hint_ok():
+                    for nm, (lb, ub) in _pass_snap.items():
+                        vv = m.getVarByName(nm)
+                        if vv is not None:
+                            vv.LB = lb; vv.UB = ub
+                    m.update()
+                    n_tightened  -= pass_tightened
+                    total_shrink -= pass_shrink
+                    if self.verbose:
+                        print(f"[OBBT]   pass {it + 1} would EXCLUDE the hint CE — "
+                              f"rolled back {pass_tightened} bound(s) and stopped "
+                              f"iterating (validity self-guard).")
+                    break
+            if pass_tightened == 0:
+                break
+            R_lp.update()
+
+        m.update()
+        if self.verbose:
+            print(f"[OBBT] DONE: solved {n_solved} LPs, "
+                  f"tightened {n_tightened} bounds, "
+                  f"total shrink {total_shrink:.4e}")
+        R_lp.dispose()
+        R.dispose()
+        return {"tightened": n_tightened, "solved": n_solved,
+                "shrink": total_shrink}
+
     def _analytic_warm_start(
         self,
         m: gp.Model,
@@ -1674,11 +2285,414 @@ class UCDecomp4b:
                     set_z(f"gsmlb_{b}_{t}",
                           pick_z(sol["gsm_lb"][b, t], sol["sm"][b, t]))
 
+            # --- strongdual: McCormick aux w = b·μ on free lines ----------
+            # set_z calls above are harmless no-ops in this mode (no z vars);
+            # here we inject the bilinear products at the LP-optimal duals.
+            if self.comp_mode == "strongdual" and self.bilinear_exact:
+                # Exact bilinear (Fix 3): no w/segment vars — Gurobi computes
+                # b·μ from the b and μ Starts already injected above. Nothing more.
+                pass
+            elif self.comp_mode == "strongdual" and self.mccormick_segments <= 1:
+                # Single envelope: w = b_hint·μ.
+                for ell in self.free:
+                    b_e = float(b_hint[ell])
+                    for t in range(T):
+                        for nm, arr in (("wmup", sol["mu_p"]),
+                                        ("wmum", sol["mu_m"])):
+                            v = m.getVarByName(f"{nm}{s}[{ell},{t}]")
+                            if v is not None:
+                                try: v.Start = b_e * float(arr[ell, t])
+                                except Exception: pass
+            elif self.comp_mode == "strongdual":
+                # Piecewise: activate the segment k* containing b_hint[ell] and
+                # set bseg/μseg/wseg there (0 elsewhere).  bdelta/bseg are global
+                # (no s suffix); μseg/wseg are per-pattern (s suffix).
+                breaks = master_vars.get("breaks", {})
+                K = self.mccormick_segments
+                for ell in self.free:
+                    b_e = float(b_hint[ell])
+                    beta = breaks.get(ell)
+                    if beta is None:
+                        continue
+                    kstar = K - 1
+                    for k in range(K):
+                        if beta[k] - 1e-9 <= b_e <= beta[k + 1] + 1e-9:
+                            kstar = k
+                            break
+                    for k in range(K):
+                        dv = m.getVarByName(f"bdelta[{ell},{k}]")
+                        sgv = m.getVarByName(f"bseg[{ell},{k}]")
+                        if dv is not None:
+                            try: dv.Start = 1.0 if k == kstar else 0.0
+                            except Exception: pass
+                        if sgv is not None:
+                            try: sgv.Start = b_e if k == kstar else 0.0
+                            except Exception: pass
+                    for t in range(T):
+                        for nm, arr in (("wmup", sol["mu_p"]),
+                                        ("wmum", sol["mu_m"])):
+                            muval = float(arr[ell, t])
+                            for k in range(K):
+                                ms = m.getVarByName(f"{nm}_ms{s}[{ell},{t},{k}]")
+                                wv = m.getVarByName(f"{nm}_w{s}[{ell},{t},{k}]")
+                                act = (k == kstar)
+                                if ms is not None:
+                                    try: ms.Start = muval if act else 0.0
+                                    except Exception: pass
+                                if wv is not None:
+                                    try: wv.Start = (b_e * muval) if act else 0.0
+                                    except Exception: pass
+
         m.update()
         if self.verbose:
             print(f"  [WS-ANALYTIC] Done. {len(patterns)} KKT block(s) populated "
                   f"with LP-optimal primal/dual + analytic z's.")
         return True
+
+    # ------------------------------------------------------------------
+    # Stall diagnostic
+    # ------------------------------------------------------------------
+
+    def _diagnose_stall(
+        self, m: gp.Model, master_vars: Dict, b_k: np.ndarray,
+        patterns: List[np.ndarray], u_k: np.ndarray,
+        vp: Optional[float], vd: Optional[float],
+        window_size: int, per_bus_neutrality: bool,
+        p_init: np.ndarray, u_init: np.ndarray,
+    ):
+        """At a cycle-halt, decide WHY the LB is stuck:
+
+          (a) MISSING PATTERN — at b_k the foil is dominated by every KKT
+              pattern's TRUE dispatch cost (master_foil ≤ min_j true_disp_j),
+              so the cut set lacks the pattern that actually beats the foil.
+              ⇒ need more / better patterns (Technique 1 / pattern source).
+          (b) RELAXATION GAP — the master's dispatch value for some pattern j
+              is INFLATED vs its true value (master_disp_j ≫ true_disp_j),
+              so b_k passes a relaxed cut it should violate.
+              ⇒ tighten the relaxation (projection / better McCormick).
+
+        Prints per-pattern master_disp vs true_disp and the master foil cost.
+        """
+        idx, cvec, data = self.idx, self.cvec, self.data
+        nG, nB, nR, T = len(data.gens), int(data.nB), len(data.rens), int(data.T)
+        var_f = master_vars["var"]
+
+        def _val(v):
+            try: return float(v.X)
+            except Exception: return 0.0
+
+        # Master foil cost at the solution (LHS of every opt_cut).
+        mfoil = 0.0
+        for g in range(nG):
+            for t in range(T):
+                mfoil += (float(cvec[idx.u[g, t]]) * _val(var_f["u"][g, t])
+                          + float(cvec[idx.v[g, t]]) * _val(var_f["v"][g, t])
+                          + float(cvec[idx.w[g, t]]) * _val(var_f["w"][g, t])
+                          + float(cvec[idx.p[g, t]]) * _val(var_f["p"][g, t]))
+        for b in range(nB):
+            for t in range(T):
+                mfoil += (float(cvec[idx.shed[b, t]])   * _val(var_f["shed"][b, t])
+                          + float(cvec[idx.splus[b, t]])  * _val(var_f["splus"][b, t])
+                          + float(cvec[idx.sminus[b, t]]) * _val(var_f["sminus"][b, t]))
+        for r in range(nR):
+            for t in range(T):
+                mfoil += float(cvec[idx.curt[r, t]]) * _val(var_f["curt"][r, t])
+
+        ce_gap = (vd - vp) if (vd is not None and vp is not None) else None
+        print(f"  [STALL] b_k: F={self.F(b_k):.4f}  v_plain={vp}  v_foil={vd}  "
+              f"oracle_CE_gap={ce_gap}  (>0 ⇒ b_k NOT a true CE)")
+        print(f"  [STALL] master foil cost at b_k = {mfoil:.2f}  "
+              f"(true foil optimum v_foil = {vd})")
+
+        def _lp_const(u_j):
+            v_j, w_j = _compute_vw_from_u(u_j, np.asarray(u_init, float))
+            c = 0.0
+            for g in range(nG):
+                for t in range(T):
+                    c += (float(cvec[idx.u[g, t]]) * float(u_j[g, t])
+                          + float(cvec[idx.v[g, t]]) * float(v_j[g, t])
+                          + float(cvec[idx.w[g, t]]) * float(w_j[g, t]))
+            return c
+
+        worst_infl = 0.0
+        min_true = float("inf")
+        for jx, u_j in enumerate(patterns):
+            c = m.getConstrByName(f"opt_cut_{jx}")
+            if c is None:
+                continue
+            master_disp = mfoil + float(c.Slack)   # = lp_var_j + lp_const_j (master)
+            sol = self._solve_dispatch_lp(
+                b_k, u_j, window_size, per_bus_neutrality, p_init)
+            if sol is None:
+                print(f"  [STALL]   pattern {jx}: true dispatch LP infeasible")
+                continue
+            true_disp = float(sol["obj"]) + _lp_const(u_j)
+            infl = master_disp - true_disp
+            worst_infl = max(worst_infl, infl)
+            min_true = min(min_true, true_disp)
+            print(f"  [STALL]   pattern {jx} (sum_u={int(u_j.sum())}): "
+                  f"master_disp={master_disp:.2f}  true_disp={true_disp:.2f}  "
+                  f"inflation={infl:+.2f}")
+
+        # Verdict
+        print(f"  [STALL] worst master-vs-true inflation = {worst_infl:.2f};  "
+              f"min true dispatch over patterns = {min_true:.2f};  "
+              f"master foil = {mfoil:.2f}")
+        if worst_infl > 1e-2 * max(1.0, abs(min_true)):
+            print("  [STALL] VERDICT: RELAXATION GAP — master inflates a "
+                  "pattern's dispatch cost (tighten relaxation: projection / "
+                  "better McCormick).")
+        elif min_true < mfoil - 1e-6:
+            print("  [STALL] VERDICT: MISSING PATTERN — some KKT pattern's TRUE "
+                  "dispatch already beats the master foil, yet b_k survives "
+                  "(check cut/foil consistency).")
+        else:
+            print("  [STALL] VERDICT: MISSING PATTERN — master foil ≤ every "
+                  "known pattern's true dispatch; the pattern that beats the "
+                  "foil at b_k is not in the cut set (need a new pattern source: "
+                  "Technique 1 / multi-pattern).")
+
+    # ------------------------------------------------------------------
+    # Multi-start master solve (bound-variance reduction)
+    # ------------------------------------------------------------------
+
+    def _solve_master_multistart(self, m: gp.Model) -> float:
+        """Solve master m with up to `master_multistart` Gurobi Seeds; return the
+        MAX ObjBound across starts (a valid LB on F*).
+
+        Rationale: the NonConvex MIQCP proves a different (valid) ObjBound per
+        random seed under a time limit — so the max over seeds beats the bound
+        variance that blocks certification (observed on IEEE 57/14).  Cheap when
+        the master is easy: the FIRST start that returns OPTIMAL (gap closed) or
+        no incumbent stops the loop — so grids that solve fast (IEEE 39) pay for
+        only one start.  Gurobi retains the best incumbent across re-optimizes of
+        the same model, so after the loop m holds the best solution for b_k.
+
+        Sequential here; on HPC the seeds are independent and parallelizable
+        (e.g. one process per seed, aggregate the max ObjBound externally).
+        """
+        n = self.master_multistart
+        # Base seed: master_seed if given (reproducible), else 0.
+        base = int(self.master_seed) if self.master_seed is not None else 0
+        best_bound = -float("inf")
+        for i in range(max(1, n)):
+            try:
+                m.Params.Seed = base + i
+            except Exception:
+                pass
+            _optimize_with_retry(m)
+            try:
+                best_bound = max(best_bound, float(m.ObjBound))
+            except Exception:
+                pass
+            st = m.Status
+            # Stop early: nothing more to gain from extra seeds if this solve
+            # proved optimality (no variance) or found no incumbent at all
+            # (a different seed won't change feasibility), or we're not in
+            # multi-start mode.
+            if n <= 1 or st in (GRB.OPTIMAL,) or m.SolCount == 0:
+                break
+            if self.verbose and i + 1 < n:
+                print(f"  [MULTISTART] seed {base + i}: ObjBound={float(m.ObjBound):.4f} "
+                      f"(running max {best_bound:.4f}) — trying seed {base + i + 1}")
+        return best_bound
+
+    # ------------------------------------------------------------------
+    # Node-OBBT: spatial branch-and-bound over the b-box (Strategy 5)
+    # ------------------------------------------------------------------
+
+    def _solve_master_spatial_obbt(
+        self,
+        m: gp.Model,
+        master_vars: Dict,
+        patterns: List[np.ndarray],
+        window_size: int,
+        per_bus_neutrality: bool,
+        u_init: np.ndarray,
+        p_init: np.ndarray,
+        on_time_init: np.ndarray,
+        off_time_init: np.ndarray,
+    ) -> Dict:
+        """Solve the exact-bilinear master via an explicit spatial branch-and-bound
+        over the shared b-box, running OBBT at every box ("per-node OBBT").
+
+        Why we drive the tree ourselves: Gurobi's callback API cannot tighten a
+        node's local variable bounds inside its own spatial B&B (you can read the
+        node relaxation but not shrink μ within a subtree).  So we partition the
+        b-box, and for each sub-box we (a) re-run OBBT — which Gurobi can't do for
+        us — to sharpen μ_p/μ_m given the box, then (b) call Gurobi to BOUND the
+        box's MIQCP.
+
+        VALIDITY (the load-bearing argument; this project has been bitten by
+        invalid LBs before).  The boxes are an exhaustive partition of the root
+        b-box.  For a minimization, F* = min over boxes of (box optimum) and each
+        box's Gurobi `ObjBound` is a valid lower bound on its optimum, so
+
+            global_LB := min over current leaf boxes of (box ObjBound)  ≤  F*.
+
+        This holds at *every* stopping point (node-cap, certified, or stuck), so
+        the returned LB is always valid.  Best-first on the smallest box-LB is the
+        engine that RAISES global_LB: we always split the box pinning the bound
+        down.  An incumbent found in any box is feasible for the full master (a
+        box only RESTRICTS b; OBBT only removes non-exact-feasible μ), so it is a
+        globally valid CE candidate and may tighten global_UB / the pruning cap.
+
+        Returns dict: {LB, UB, b_k, status, boxes}.  m's b/μ bounds are snapshotted
+        and restored, so subsequent CCG iterations are unaffected; b_k is returned
+        explicitly because m's .X reflects only the last box solved.
+        """
+        free = self.free
+        nL = len(self.data.lines)
+        T = int(self.data.T)
+        tol = self.node_obbt_tol if self.node_obbt_tol is not None else self.eps_obj
+
+        # --- snapshot m's current (root-OBBT) b and μ bounds for restore -------
+        b_snap = {ell: (float(master_vars["b"][ell].LB),
+                        float(master_vars["b"][ell].UB)) for ell in free}
+        mu_snap: Dict[str, float] = {}
+        for j_idx in range(len(patterns)):
+            s = f"_{j_idx}"
+            for ell in free:
+                for t in range(T):
+                    for tag in ("mup", "mum"):
+                        nm = f"{tag}{s}[{ell},{t}]"
+                        vv = m.getVarByName(nm)
+                        if vv is not None:
+                            mu_snap[nm] = float(vv.UB)
+
+        # --- incumbent (from the hint CE registered before the loop) ----------
+        if self.best_b is not None and np.isfinite(self.best_F):
+            global_UB = float(self.best_F)
+            b_k_global = self.best_b.copy()
+        else:
+            global_UB = float("inf")
+            b_k_global = self.b0.copy()
+
+        # --- frontier: every CURRENT leaf box; global_LB = min leaf lb --------
+        root_box = {"bounds": {ell: b_snap[ell] for ell in free},
+                    "lb": -float("inf"), "processed": False}
+        leaves: List[Dict] = [root_box]
+        nodes_done = 0
+        status = "budget_exhausted"
+
+        try:
+            while nodes_done < self.node_obbt_max_nodes:
+                global_LB = min(bx["lb"] for bx in leaves)
+                if global_UB - global_LB <= tol:
+                    status = "certified"
+                    break
+                limiting = min(leaves, key=lambda bx: bx["lb"])
+                if limiting["processed"]:
+                    # The leaf pinning global_LB is already processed and could
+                    # not be split further (too thin) — no open box can lower it,
+                    # so the bound is stuck for this budget.
+                    status = "stuck_thin"
+                    break
+                open_boxes = [bx for bx in leaves if not bx["processed"]]
+                if not open_boxes:
+                    status = "frontier_exhausted"
+                    break
+                box = min(open_boxes, key=lambda bx: bx["lb"])
+
+                # apply box: set b to the box.  μ stays at the root-OBBT bounds
+                # (valid for any sub-box) unless per-box OBBT is requested, in
+                # which case we reset μ to the snapshot and re-tighten within the
+                # box.  Per-box OBBT is OFF by default: a single-dim b-split barely
+                # moves the μ-max, so it tightens ~0 at high LP cost (measured on
+                # IEEE 14) — the real per-box lever is the tighter b-box feeding
+                # Gurobi's spatial relaxation of b·μ.
+                if self.node_obbt_per_box:
+                    for nm, ub in mu_snap.items():
+                        vv = m.getVarByName(nm)
+                        if vv is not None:
+                            vv.UB = ub
+                for ell in free:
+                    lo, hi = box["bounds"][ell]
+                    master_vars["b"][ell].LB = lo
+                    master_vars["b"][ell].UB = hi
+                m.update()
+                if self.node_obbt_per_box:
+                    self._obbt_root(
+                        m, master_vars, patterns,
+                        window_size, per_bus_neutrality,
+                        u_init, p_init, on_time_init, off_time_init,
+                        sync_bounds_from_m=True,
+                    )
+
+                # bound the box's MIQCP (NonConvex=2 already set on m)
+                m.Params.TimeLimit   = self.node_obbt_budget
+                m.Params.MIPFocus    = self.master_mip_focus
+                m.Params.NumericFocus = 2
+                if self.master_threads is not None:
+                    m.Params.Threads = int(self.master_threads)
+                _optimize_with_retry(m)
+                nodes_done += 1
+                box["processed"] = True
+
+                try:
+                    box_bound = float(m.ObjBound)
+                except Exception:
+                    box_bound = box["lb"]
+                box["lb"] = max(box["lb"], box_bound)
+
+                if m.SolCount > 0:
+                    try:
+                        box_inc = float(m.ObjVal)
+                    except Exception:
+                        box_inc = float("inf")
+                    if box_inc < global_UB - 1e-12:
+                        global_UB = box_inc
+                        b_k_global = np.array([
+                            float(master_vars["b"][ell].X) if ell in self._free_set
+                            else float(self.b0[ell]) for ell in range(nL)])
+
+                # prune (closed) or branch on the widest free b[ell]
+                branched = False
+                if box["lb"] < global_UB - tol:
+                    widths = {ell: box["bounds"][ell][1] - box["bounds"][ell][0]
+                              for ell in free}
+                    ell_split = max(widths, key=lambda e: widths[e])
+                    lo, hi = box["bounds"][ell_split]
+                    min_w = 1e-4 * max(1.0, float(self.bU[ell_split] - self.bL[ell_split]))
+                    if (hi - lo) > min_w and (nodes_done < self.node_obbt_max_nodes):
+                        mid = 0.5 * (lo + hi)
+                        for (clo, chi) in ((lo, mid), (mid, hi)):
+                            child = {"bounds": dict(box["bounds"]),
+                                     "lb": box["lb"], "processed": False}
+                            child["bounds"][ell_split] = (clo, chi)
+                            leaves.append(child)
+                        leaves.remove(box)
+                        branched = True
+
+                if self.verbose:
+                    gLB = min(bx["lb"] for bx in leaves)
+                    act = (f"split ell={ell_split}" if branched
+                           else ("pruned" if box["lb"] >= global_UB - tol
+                                 else "leaf(thin/cap)"))
+                    print(f"  [NODE-OBBT] box {nodes_done}/{self.node_obbt_max_nodes}: "
+                          f"box_LB={box_bound:.4f} → global_LB={gLB:.4f}  "
+                          f"global_UB={global_UB:.4f}  gap={global_UB-gLB:.4f}  "
+                          f"leaves={len(leaves)}  [{act}]")
+        finally:
+            for ell in free:
+                lo, hi = b_snap[ell]
+                master_vars["b"][ell].LB = lo
+                master_vars["b"][ell].UB = hi
+            for nm, ub in mu_snap.items():
+                vv = m.getVarByName(nm)
+                if vv is not None:
+                    vv.UB = ub
+            m.update()
+
+        global_LB = min(bx["lb"] for bx in leaves) if leaves else global_UB
+        # A valid LB never exceeds the best achieved incumbent.
+        global_LB = min(global_LB, global_UB)
+        if self.verbose:
+            print(f"  [NODE-OBBT] DONE: global_LB={global_LB:.4f}  "
+                  f"global_UB={global_UB:.4f}  gap={global_UB-global_LB:.4f}  "
+                  f"boxes={nodes_done}  status={status}")
+        return {"LB": global_LB, "UB": global_UB, "b_k": b_k_global,
+                "status": status, "boxes": nodes_done}
 
     # ------------------------------------------------------------------
     # Main loop
@@ -1712,6 +2726,42 @@ class UCDecomp4b:
             tol = max(self.eps_weak, EPS_REL_CE * abs(vp))
             return vd <= vp + tol
 
+        # STRICT CE check (vd ≤ vp + tiny).  A tolerant CE (within EPS_REL_CE ~
+        # 1e-4·|vp| ≈ 82) can still have a missing pattern that beats the foil by
+        # up to that tolerance — i.e. it is NOT a true CE for the EXACT master,
+        # whose optimality cuts are exact.  Using a tolerant b_k to refresh the
+        # warm-start hint or tighten the F ≤ F_hint cap is unsafe: the next
+        # iteration's new pattern cut excludes that b_k (warm start violates the
+        # cut by the CE gap; observed 14.97 on IEEE 14), AND the cap can drop
+        # below the true minimal STRICT CE, making the master infeasible.  So we
+        # gate best_F / F-cap / hint refresh on this STRICT check, and keep the
+        # last strict-feasible point (the B&S CE) as the warm start otherwise.
+        # Once the pattern set is complete the master's optimistic b_k satisfies
+        # all exact cuts ⇒ vd − vp → 0 (≤ FeasibilityTol) ⇒ passes this gate and
+        # best_F drops to the true strict optimum.  See DECOMP_state.md
+        # "strict vs tolerant CE".
+        EPS_ABS_CE_STRICT = float(self.eps_ce_strict)
+        def _ce_strict(vd, vp):
+            if vd is None or vp is None:
+                return False
+            return vd <= vp + EPS_ABS_CE_STRICT
+
+        # Safe MIP gap getter — `m.MIPGap` is not always retrievable for a
+        # NonConvex MIQCP at a time limit (especially after multi-start
+        # re-optimizes the model with different Seeds), and accessing it then
+        # raises AttributeError.  Fall back to |ObjVal−ObjBound|/|ObjVal|, then
+        # to nan.  (`m` is bound later in this scope; the closure resolves it
+        # lazily, so this is only ever called after the master is built.)
+        def _safe_mipgap():
+            try:
+                return float(m.MIPGap)
+            except Exception:
+                try:
+                    ov = float(m.ObjVal); ob = float(m.ObjBound)
+                    return abs(ov - ob) / max(abs(ov), 1e-9)
+                except Exception:
+                    return float("nan")
+
         # Track the master's last incumbent (whether or not it certifies as a CE).
         # Useful for diagnostics when the algorithm stops without finding a
         # better certified CE than the input hint (e.g., cycle detection).
@@ -1724,7 +2774,8 @@ class UCDecomp4b:
                 print("[DECOMP] Warm-start at b0 ...")
             vp, _, sp = self.oracle.solve_plain(self.b0)
             vd, _, sd = self.oracle.solve_foil(self.b0)
-            if _ce_ok(vd, vp):
+            if _ce_strict(vd, vp):
+                # b0 a strict CE ⇒ F=0 is the global optimum (no change needed).
                 self._update_incumbent(self.b0, self.F(self.b0), vp, vd)
 
             # Build base master
@@ -1805,6 +2856,89 @@ class UCDecomp4b:
                 if self.verbose:
                     print(f"[DECOMP] Added hint upper bound: F ≤ {F_ub:.4f}")
 
+            # ---- Tighten McCormick mu-box (Technique 3, Option A) ---------
+            # Must run BEFORE any KKT block is added (seeded or in-loop) so all
+            # strongdual blocks share the tightened box.  HEURISTIC — re-validate.
+            if self.comp_mode == "strongdual" and self.mccormick_mu_factor is not None:
+                self._estimate_mu_box(
+                    [self.b0, self.b_hat_hint, b_ws],
+                    window_size, per_bus_neutrality, p_init,
+                )
+
+            # ---- Pattern seeding (Technique 2) ----------------------------
+            # Pre-load KKT blocks for the plain-optimal commitment patterns at
+            # the key line-capacity vectors {b0, b_hat (B&S), bU (max expand)}.
+            # The LB only rises when a pattern's optimality cut binds at the
+            # optimistic master b; seeding the patterns most likely to bind
+            # gives the master strong optimality info from iteration 1 instead
+            # of discovering them one-at-a-time (and cycle-halting after 1-2).
+            if self.seed_patterns:
+                seed_bs = [("b0", self.b0)]
+                if self.b_hat_hint is not None:
+                    seed_bs.append(("b_hat", self.b_hat_hint))
+                seed_bs.append(("bU", b_ws))
+                # Strategy 4: interior interpolation points b0 + α(bU − b0) on the
+                # free lines.  These cover the b-path between "no change" and "max
+                # expansion" — exactly where the LB-binding optimum lives — so the
+                # master can't settle at a non-CE b that sits between the corner
+                # patterns' cuts (the "missing pattern" stall).  Each interior b
+                # contributes its plain-optimal commitment (deduped via `seen`).
+                if self.seed_interp > 0:
+                    K = self.seed_interp
+                    for k in range(1, K + 1):
+                        alpha = k / (K + 1)
+                        b_mid = self.b0.copy()
+                        b_mid[self.free] = (self.b0[self.free]
+                                            + alpha * (b_ws[self.free] - self.b0[self.free]))
+                        seed_bs.append((f"interp_{alpha:.2f}", b_mid))
+                n_seeded = 0
+                for tag, b_seed in seed_bs:
+                    vps, _, sps = self.oracle.solve_plain(b_seed)
+                    if sps is None:
+                        if self.verbose:
+                            print(f"  [SEED] plain UC infeasible at {tag} — skip")
+                        continue
+                    u_seed = np.round(sps["u"]).astype(int)
+                    pks = self._pattern_key(u_seed)
+                    if pks in seen:
+                        continue
+                    seen.add(pks)
+                    self._add_iteration_block(
+                        m, master_vars, j, u_seed, u_init, p_init,
+                        window_size, per_bus_neutrality,
+                    )
+                    patterns.append(u_seed)
+                    j += 1
+                    n_seeded += 1
+                    if self.verbose:
+                        print(f"  [SEED] added KKT block for {tag} "
+                              f"(sum(u)={int(u_seed.sum())})  patterns={j}")
+                if n_seeded and _b_hint_sol is not None:
+                    # Warm-start all seeded blocks so iter 1 has a complete
+                    # integer-feasible incumbent (analytic, ~fast).
+                    self._inject_mip_start(m, master_vars, self.b_hat_hint,
+                                           _b_hint_sol, u_init)
+                    self._full_integer_warm_start(
+                        m, master_vars,
+                        self.b_hat_hint, _b_hint_sol, patterns,
+                        window_size, per_bus_neutrality,
+                        u_init, p_init, on_time_init, off_time_init,
+                    )
+                if self.verbose:
+                    print(f"[DECOMP] Seeded {n_seeded} pattern(s) before main loop.")
+
+            # ---- Root OBBT (Strategy 1) --------------------------------------
+            # Tighten μ_p / μ_m UBs for free lines via auxiliary LPs over a
+            # McCormick LP relaxation of m.  Provably valid (cannot exclude any
+            # exact-feasible point); shrinks the spatial-B&B box on b·μ when
+            # bilinear_exact=True.  See DECOMP_OBBT_offload.md.
+            if self.obbt:
+                self._obbt_root(
+                    m, master_vars, patterns,
+                    window_size, per_bus_neutrality,
+                    u_init, p_init, on_time_init, off_time_init,
+                )
+
             for k in range(self.max_iter):
                 if self.verbose:
                     nv, nc, ni = m.NumVars, m.NumConstrs, m.NumIntVars
@@ -1813,83 +2947,137 @@ class UCDecomp4b:
 
                 m.Params.OutputFlag   = self.master_output_flag
                 m.Params.MIPGap       = self.master_mip_gap
-                m.Params.MIPFocus     = 1   # prioritise finding feasible solutions
+                # MIPFocus: 1 = find incumbents (default), 3 = focus on the bound
+                # (ObjBound) — better for raising the LB when a good incumbent is
+                # already supplied by the warm start (exact MIQCP on IEEE 14/57,
+                # where the LB is the bottleneck).  See DECOMP_state.md
+                # "Master-MIP scaling is the lever".
+                m.Params.MIPFocus     = self.master_mip_focus
                 m.Params.NumericFocus = 2   # extra care with near-degenerate numerics
                 if self.master_time_limit is not None:
                     m.Params.TimeLimit = self.master_time_limit
+                if self.master_threads is not None:
+                    m.Params.Threads = int(self.master_threads)
 
-                _optimize_with_retry(m)
+                # Multi-start: solve with several Gurobi Seeds and keep the MAX
+                # ObjBound.  Each ObjBound is a valid LB on F*, and the NonConvex
+                # MIQCP proves a different bound per seed, so the max beats the
+                # bound variance (e.g. IEEE 57, where one 900s draw gave a tighter
+                # bound than a 1800s draw).  Skips extra starts once a solve hits
+                # OPTIMAL (no variance to exploit) or has no incumbent.  m retains
+                # the best incumbent across starts, so b_k uses the best solution.
+                # On HPC the starts are independent and can be parallelized.
+                if self.node_obbt:
+                    # STANDARDIZED solver: spatial B&B over the b-box with OBBT at
+                    # every box (Strategy 5).  Returns a valid global LB = min over
+                    # an exhaustive b-box partition of per-box ObjBounds, and the
+                    # best incumbent b_k across boxes.  The driver restores m's
+                    # bounds before returning, so m.ObjBound here reflects only the
+                    # LAST box — we must NOT max iter_LB with it (a single box's
+                    # bound can exceed the true global min ⇒ invalid).  Hence
+                    # iter_LB = the driver's global_LB, full stop.
+                    _spatial = self._solve_master_spatial_obbt(
+                        m, master_vars, patterns,
+                        window_size, per_bus_neutrality,
+                        u_init, p_init, on_time_init, off_time_init,
+                    )
+                    iter_LB = float(_spatial["LB"])
+                    master_LB = max(master_LB, iter_LB)
+                    nL = len(self.data.lines)
+                    b_k = np.array(_spatial["b_k"], dtype=float)
+                    # "certified" ⇒ the spatial tree closed (solved to optimality)
+                    # ⇒ a repeated plain pattern is a TRUE cycle (missing pattern).
+                    # Otherwise the spatial solve was budget-limited ⇒ treat like a
+                    # master time limit (undersolved) for the cycle labeling below.
+                    tl_hit = (_spatial.get("status") != "certified")
+                else:
+                    _ms_bound = self._solve_master_multistart(m)
 
-                if m.Status == GRB.INFEASIBLE:
-                    if self.verbose:
-                        print("  [DECOMP] Master infeasible — no CE exists.")
-                    iis_path = f"decomp_master_infeas_iter{k+1}.ilp"
-                    try:
-                        m.computeIIS()
-                        m.write(iis_path)
+                    if m.Status == GRB.INFEASIBLE:
                         if self.verbose:
-                            print(f"  [DECOMP] IIS written to {iis_path}")
-                    except Exception as _e:
+                            print("  [DECOMP] Master infeasible — no CE exists.")
+                        iis_path = f"decomp_master_infeas_iter{k+1}.ilp"
+                        try:
+                            m.computeIIS()
+                            m.write(iis_path)
+                            if self.verbose:
+                                print(f"  [DECOMP] IIS written to {iis_path}")
+                        except Exception as _e:
+                            if self.verbose:
+                                print(f"  [DECOMP] IIS failed: {_e}")
+                        termination_reason = "master_infeasible"
+                        break
+
+                    # Accept TIME_LIMIT if Gurobi found at least one feasible solution
+                    tl_hit = (m.Status == GRB.TIME_LIMIT)
+                    if tl_hit and m.SolCount == 0:
                         if self.verbose:
-                            print(f"  [DECOMP] IIS failed: {_e}")
-                    termination_reason = "master_infeasible"
-                    break
+                            print("  [DECOMP] Time limit hit with no feasible master solution — stopping.")
+                        termination_reason = "time_limit_no_incumbent"
+                        break
 
-                # Accept TIME_LIMIT if Gurobi found at least one feasible solution
-                tl_hit = (m.Status == GRB.TIME_LIMIT)
-                if tl_hit and m.SolCount == 0:
+                    if m.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL) and not tl_hit:
+                        if self.verbose:
+                            print(f"  [DECOMP] Master status={m.Status}, stopping.")
+                        termination_reason = f"master_status_{m.Status}"
+                        break
+
+                    # --- LB stagnation diagnostic (DECOMP_lb_stagnation.md §4) -----
+                    # ObjBound is the formal CCG lower bound; ObjVal is the
+                    # incumbent upper bound on the master MIP.  Solving the LP
+                    # relaxation explicitly isolates the root-LP contribution to
+                    # ObjBound — if ObjBound ≈ Root LP across iterations while
+                    # new KKT blocks are being added, the LP is being absorbed by
+                    # fractional z's (bigM looseness) instead of tightening.
                     if self.verbose:
-                        print("  [DECOMP] Time limit hit with no feasible master solution — stopping.")
-                    termination_reason = "time_limit_no_incumbent"
-                    break
+                        try:
+                            ob = float(m.ObjBound)
+                            ov = float(m.ObjVal) if m.SolCount > 0 else float("nan")
+                            mg = float(m.MIPGap) if m.SolCount > 0 else float("nan")
+                            print(f"  [LB diag] ObjBound (LP-LB):   {ob:.6f}")
+                            print(f"  [LB diag] ObjVal   (int-UB):  {ov:.6f}   "
+                                  f"gap={100*mg:.2f}%")
+                            _lp_diag = m.relax()
+                            _lp_diag.Params.OutputFlag = 0
+                            _lp_diag.Params.TimeLimit  = 60.0
+                            if self.bilinear_exact:
+                                _lp_diag.Params.NonConvex = 2  # quad constr survives relax()
+                            _lp_diag.optimize()
+                            if _lp_diag.Status in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+                                print(f"  [LB diag] Root LP  (relaxed): {_lp_diag.ObjVal:.6f}")
+                            else:
+                                print(f"  [LB diag] Root LP  (relaxed): status={_lp_diag.Status}")
+                            _lp_diag.dispose()
+                        except Exception as _e:
+                            print(f"  [LB diag] failed: {_e}")
+                    # ---------------------------------------------------------------
 
-                if m.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL) and not tl_hit:
-                    if self.verbose:
-                        print(f"  [DECOMP] Master status={m.Status}, stopping.")
-                    termination_reason = f"master_status_{m.Status}"
-                    break
-
-                # --- LB stagnation diagnostic (DECOMP_lb_stagnation.md §4) -----
-                # ObjBound is the formal CCG lower bound; ObjVal is the
-                # incumbent upper bound on the master MIP.  Solving the LP
-                # relaxation explicitly isolates the root-LP contribution to
-                # ObjBound — if ObjBound ≈ Root LP across iterations while
-                # new KKT blocks are being added, the LP is being absorbed by
-                # fractional z's (bigM looseness) instead of tightening.
-                if self.verbose:
+                    # Use ObjBound as LB (tighter than ObjVal when time limit hit).
+                    # CRITICAL: take the RUNNING MAX across iterations.  Each iter's
+                    # master is a relaxation of the full problem (a subset of all
+                    # optimality cuts), so its ObjBound is a valid LB on F*; but the
+                    # exact MIQCP is non-monotone under a time limit — a later, bigger
+                    # master can prove a WEAKER bound in the same budget (observed on
+                    # IEEE 14: iter1 ObjBound 1.681 → iter2 1.631).  max_k ObjBound_k
+                    # ≤ F* is still valid and never throws away a better proven bound.
                     try:
-                        ob = float(m.ObjBound)
-                        ov = float(m.ObjVal) if m.SolCount > 0 else float("nan")
-                        mg = float(m.MIPGap) if m.SolCount > 0 else float("nan")
-                        print(f"  [LB diag] ObjBound (LP-LB):   {ob:.6f}")
-                        print(f"  [LB diag] ObjVal   (int-UB):  {ov:.6f}   "
-                              f"gap={100*mg:.2f}%")
-                        _lp_diag = m.relax()
-                        _lp_diag.Params.OutputFlag = 0
-                        _lp_diag.Params.TimeLimit  = 60.0
-                        _lp_diag.optimize()
-                        if _lp_diag.Status in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-                            print(f"  [LB diag] Root LP  (relaxed): {_lp_diag.ObjVal:.6f}")
-                        else:
-                            print(f"  [LB diag] Root LP  (relaxed): status={_lp_diag.Status}")
-                        _lp_diag.dispose()
-                    except Exception as _e:
-                        print(f"  [LB diag] failed: {_e}")
-                # ---------------------------------------------------------------
-
-                # Use ObjBound as LB (tighter than ObjVal when time limit hit)
-                try:
-                    master_LB = float(m.ObjBound)
-                except Exception:
-                    master_LB = float(m.ObjVal) if not tl_hit else 0.0
-                if tl_hit and self.verbose:
-                    print(f"  [DECOMP] Time limit hit — using best found solution (gap={m.MIPGap:.2%})")
-                nL = len(self.data.lines)
-                b_k = np.array([
-                    float(master_vars["b"][ell].X) if ell in self._free_set
-                    else float(self.b0[ell])
-                    for ell in range(nL)
-                ])
+                        # _ms_bound = max ObjBound over the multi-start seeds (≥ this
+                        # solve's ObjBound); falls back to m.ObjBound for n_starts=1.
+                        iter_LB = max(float(m.ObjBound), float(_ms_bound))
+                    except Exception:
+                        iter_LB = float(m.ObjVal) if not tl_hit else 0.0
+                    master_LB = max(master_LB, iter_LB)
+                    if self.verbose and iter_LB < master_LB - 1e-9:
+                        print(f"  [DECOMP] iter ObjBound {iter_LB:.4f} < running-max LB "
+                              f"{master_LB:.4f} (undersolved bigger master) — keeping max")
+                    if tl_hit and self.verbose:
+                        print(f"  [DECOMP] Time limit hit — using best found solution (gap={_safe_mipgap():.2%})")
+                    nL = len(self.data.lines)
+                    b_k = np.array([
+                        float(master_vars["b"][ell].X) if ell in self._free_set
+                        else float(self.b0[ell])
+                        for ell in range(nL)
+                    ])
 
                 if self.verbose:
                     print(f"  master_LB={master_LB:.4f}  "
@@ -1919,27 +3107,57 @@ class UCDecomp4b:
                     "iter":          k + 1,
                 }
 
-                # CE check (with relative+absolute tolerance, see _ce_ok above)
-                if _ce_ok(vd, vp):
+                # CE acceptance.  STRICT mode for the exact master: only a b_k
+                # whose oracle gap (vd−vp) is within eps_ce_strict is treated as
+                # a true CE for state updates (best_F, F-cap, warm-start hint).
+                # A merely-tolerant b_k (passes _ce_ok but vd−vp up to ~1e-4·|vp|)
+                # has a missing pattern beating the foil by that gap; refreshing
+                # the hint/cap to it breaks the next exact-cut warm start (the new
+                # pattern's cut excludes b_k) and can push the cap below the true
+                # strict optimum.  We still add that pattern below and keep
+                # iterating; once the pattern set is complete, b_k's gap → 0 and
+                # passes this gate.  See DECOMP_state.md "strict vs tolerant CE".
+                if _ce_strict(vd, vp):
                     is_new_best = Fk < self.best_F - 1e-9
                     self._update_incumbent(b_k, Fk, vp, vd)
                     if is_new_best and sol_d is not None:
-                        # Refresh the warm-start hint to the new best CE.  All
-                        # subsequent _analytic_warm_start calls will use this
-                        # (b, foil_sol) instead of the original B&S CE, so the
-                        # incumbent injected into Iter k+1 is at F(new best)
-                        # rather than F(b_hat_BS) — a strictly tighter starting
-                        # upper bound (F(new best) ≤ F(b_hat_BS) by definition
-                        # of "new best").
+                        # Refresh the warm-start hint to the new best STRICT CE.
+                        # Safe because a strict CE satisfies every exact opt cut
+                        # (including the about-to-be-added pattern's, since at a
+                        # strict CE the foil ties the binding dispatch), so the
+                        # injected MIP start stays feasible at iteration k+1.
                         self.b_hat_hint = b_k.copy()
                         _b_hint_sol = sol_d
                         if self.verbose:
                             print(f"  [HINT] Refreshed warm-start hint to "
-                                  f"new best CE (F={Fk:.4f})")
+                                  f"new best STRICT CE (F={Fk:.4f}, "
+                                  f"gap={vd - vp:.2e})")
                     if _hint_ub_constr is not None and self.best_F < float("inf"):
                         _hint_ub_constr.RHS = self.best_F
+                        m.update()
                         if self.verbose:
                             print(f"  [UB] Tightened upper bound: F ≤ {self.best_F:.4f}")
+                        # Iterated OBBT: the tighter F-cap shrinks the feasible
+                        # region, so re-running OBBT can derive tighter b/μ bounds
+                        # than the root pass (which used the looser F_hint).  Valid
+                        # by the same relaxation argument.  Gated by obbt_refresh
+                        # (off by default — it costs another OBBT pass per
+                        # incumbent improvement).
+                        if (self.obbt and self.obbt_refresh and is_new_best
+                                and self.comp_mode == "strongdual" and patterns):
+                            if self.verbose:
+                                print("  [OBBT] Re-running OBBT under the tighter "
+                                      "F-cap (obbt_refresh) ...")
+                            self._obbt_root(
+                                m, master_vars, patterns,
+                                window_size, per_bus_neutrality,
+                                u_init, p_init, on_time_init, off_time_init,
+                            )
+                elif _ce_ok(vd, vp) and self.verbose:
+                    # Tolerant-but-not-strict: report, but do NOT update state.
+                    print(f"  [CE] b_k tolerant-CE only (F={Fk:.4f}, "
+                          f"gap={vd - vp:.4f} > eps_ce_strict={self.eps_ce_strict:g}) "
+                          f"— missing pattern; not refreshing best_F/cap/hint.")
 
                 # Convergence
                 gap = self.best_F - master_LB
@@ -1952,16 +3170,42 @@ class UCDecomp4b:
                     termination_reason = "certified_optimal"
                     break
 
-                # Cycle detection
+                # Cycle detection.  A repeated plain pattern means SP1 at b_k
+                # produced a u_k we already have a KKT block for, so re-adding it
+                # can't change the master.  BUT this is only a TRUE cycle when the
+                # master was solved to (near) optimality: then b_k is the genuine
+                # optimistic point and a repeated pattern signals a missing
+                # pattern SOURCE.  When the master hit its TIME LIMIT (undersolved,
+                # gap still large), b_k is just the best incumbent Gurobi happened
+                # to find — typically pinned near the warm-start hint — and its
+                # plain pattern repeating only means "the exact MIQCP couldn't
+                # reach the next optimistic point in budget".  That is a
+                # master-MIP-SCALING limit, not a pattern-source limit; relabel it
+                # so the two are not conflated (the lever is more master time /
+                # tighter OBBT / better params, not a new pattern source).  See
+                # DECOMP_state.md "Master-MIP scaling is the lever".
                 if sol_p is None:
                     termination_reason = "sp1_infeasible"
                     break
                 u_k = np.round(sol_p["u"]).astype(int)
                 pk  = self._pattern_key(u_k)
                 if pk in seen:
-                    if self.verbose:
-                        print("  [DECOMP] Cycle detected, stopping.")
-                    termination_reason = "cycle"
+                    if tl_hit:
+                        if self.verbose:
+                            print(f"  [DECOMP] Repeated pattern under master TIME "
+                                  f"LIMIT (gap={_safe_mipgap():.2%}) — master undersolved, "
+                                  f"not a true cycle. Stopping (needs more master "
+                                  f"time / tighter OBBT).")
+                        termination_reason = "time_limit_undersolved"
+                    else:
+                        if self.verbose:
+                            print("  [DECOMP] Cycle detected (master solved to "
+                                  "optimality) — missing pattern source.")
+                            self._diagnose_stall(
+                                m, master_vars, b_k, patterns, u_k, vp, vd,
+                                window_size, per_bus_neutrality, p_init, u_init,
+                            )
+                        termination_reason = "cycle"
                     break
                 seen.add(pk)
 
@@ -2003,6 +3247,8 @@ class UCDecomp4b:
                     _m_lp = m.relax()
                     _m_lp.Params.OutputFlag = 0
                     _m_lp.Params.TimeLimit  = 120.0
+                    if self.bilinear_exact:
+                        _m_lp.Params.NonConvex = 2  # quad constr survives relax()
                     _m_lp.optimize()
                     _lp_s = _m_lp.Status
                     if _lp_s == GRB.INFEASIBLE:
