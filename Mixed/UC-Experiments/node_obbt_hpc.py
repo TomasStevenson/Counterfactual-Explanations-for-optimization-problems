@@ -104,7 +104,7 @@ def build_grid(grid):
     return dict(DATA=DATA, idx=idx, cvec=cvec, b0=b0, foil_fn=foil_fn, w=w,
                 oracle=oracle, free_idx=list(free_idx), bL=bL, bU=bU, b_hint=b_hint,
                 hint_source=hint_source, bs_best_F=bs_best_F, bs_LB=bs_LB,
-                run_kwargs=run_kwargs)
+                E_factual=E_fac, run_kwargs=run_kwargs)
 
 
 def _make_decomp(g, bL_box, bU_box, budget, seed_interp, max_iter,

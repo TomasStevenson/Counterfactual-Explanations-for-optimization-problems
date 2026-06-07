@@ -62,6 +62,17 @@ PYEOF
 
 # --- 1. init (skip if resuming) -------------------------------------------
 if [[ ! -f "$RUNDIR/state.json" ]]; then
+  # Optional LIVE Branch-&-Sandwich phase. Set BS_NODES to (re)generate
+  # bs_<grid>_checkpoint.json on the cluster BEFORE init, so the DECOMP hint is a
+  # freshly-computed B&S CE rather than the committed checkpoint (full B&S->DECOMP
+  # pipeline). BS_FRESH defaults to "fresh" (new tree); set BS_FRESH="" to
+  # resume/extend an existing checkpoint instead.
+  #   BS_NODES=300 ./run_coordinator_leftraru.sh 57 runs/c57 600 8 10
+  if [[ -n "${BS_NODES:-}" ]]; then
+    echo "[driver] LIVE B&S phase: sbatch --wait run_bs.slurm ${GRID} ${BS_NODES} '${BS_FRESH-fresh}'"
+    sbatch --wait run_bs.slurm "${GRID}" "${BS_NODES}" "${BS_FRESH-fresh}"
+    echo "[driver] B&S phase done — bs_${GRID}_checkpoint.json regenerated; init will use it as the hint."
+  fi
   echo "[driver] init grid=IEEE${GRID} dir=${RUNDIR} budget=${BUDGET} split_k=${SPLIT_K} tol=${TOL}"
   "$PY" "$COORD" init "$GRID" "$RUNDIR" --budget "$BUDGET" --split-k "$SPLIT_K" --tol "$TOL"
 else
