@@ -475,6 +475,21 @@ IEEE 39 @700 s: **certified** F=0.7060, gap≈0, wall 542 s, `hit_TL=False`, CE 
 `--per-box-budget` must exceed the per-box OBBT (~480 s on IEEE 39) — use **600 s**. Full run:
 `run_benchmark.py --time-limit 3600 --grids 14,39,57 --solvers node,coordinator --per-box-budget 600`.
 
+**1-hour benchmark RESULTS (2026-06-06, single machine, time_limit=3600 s, per-box 600 s):**
+| grid | solver | CE F_opt | CE changes | LB | gap% | certified | wall s | hit_TL |
+|------|--------|---------:|------------|-----:|-----:|-----------|-------:|--------|
+| **IEEE 39** | **node** | **0.7060** | L13:+2.819 | 0.7060 | **0.0008** | ✅ **yes** | 599 | no |
+| IEEE 39 | coordinator | 0.7138 | L13:+2.850 | 0.7060 | 1.09 | no | 3612 | yes |
+| **IEEE 57** | **node** | **10.390** | L20:+19.9; L69:+33.7 | 9.874 | **4.97** | no | 3604 | yes |
+| IEEE 57 | coordinator | 11.680 | L20:+13.1; L69:+41.5 | 8.475 | 27.44 | no | 3638 | yes |
+| **IEEE 14** | **node** | **2.382** | L14:+6.8; L15:+7.6; L18:+2.9 | 1.633 | **31.44** | no | 3605 | yes |
+| IEEE 14 | coordinator | 2.382 | (same) | 1.625 | 31.77 | no | 3607 | yes |
+
+Takeaways: **IEEE 39 (node) certifies 0% in ~10 min** (minimal CE = expand line 13 by +2.82). The
+**`node` solver is the sequential winner** (39 cert; 57 ~5%; 14 ~31%); the `coordinator` is worse on
+one machine (rebuilds OBBT per box) — it only pays off with concurrent boxes on HPC. IEEE 14/57 hit
+the 1 h limit ⇒ need the parallel Leftraru budget to certify. Full data: `benchmark_results/results.csv`.
+
 ### Next
 1. **Run the v3 coordinator on Leftraru** at high per-box budget — the gap-closer for IEEE 14/57.
 2. Optional: warm-start the *infeasible-side* children less wastefully (skip solving a child whose

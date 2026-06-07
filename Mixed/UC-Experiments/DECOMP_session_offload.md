@@ -56,28 +56,25 @@ easy (39 at box 1) and adds boxes only where the MIQCP is hard (14/57).
 Commits: `44f7777` (node-OBBT + OBBT fix), `38350ab` (theory + port + scaling), `299a97d` (v2 emit
 + cold-box fix), `1538556` (v3 coordinator), `ba3f535` (time limit + benchmark).
 
-## 4. ⏳ IN FLIGHT — the 1-hour benchmark (FIRST thing to check on pickup)
+## 4. ✅ DONE — the 1-hour benchmark RESULTS (single machine, time_limit=3600 s, per-box 600 s)
 
-A full time-limited benchmark was launched 2026-06-06 (background task `btvqqgnpz`):
-```
-python run_benchmark.py --time-limit 3600 --grids 39,57,14 --solvers node,coordinator \
-       --per-box-budget 600 --outdir benchmark_results
-```
-Results are appended per `(solver,grid)` to **`benchmark_results/results.csv`** (+ `.json` with full
-`b_hat`). Columns: `grid, solver, time_limit_s, F_opt, master_LB, gap, gap_pct, certified,
-wall_time_s, hit_time_limit, termination_reason, n_lines_changed, ce_changes`.
+`run_benchmark.py --time-limit 3600 --grids 39,57,14 --solvers node,coordinator --per-box-budget 600`
+completed 2026-06-06. Full data in **`benchmark_results/results.csv`** (+ `.json` with full `b_hat`):
 
-**On pickup:**
-1. `cat benchmark_results/results.csv` — is it complete (6 rows: 3 grids × 2 solvers)? If the run
-   was interrupted, re-launch (the runner appends; or `rm -rf benchmark_results` then rerun the
-   whole command).
-2. Evaluate: per grid+solver — did it certify or hit the limit? CE (`F_opt`/`ce_changes`), `gap_pct`,
-   `wall_time_s`. Compare `node` (efficient sequential) vs `coordinator` (parallel-structured).
-3. Expected: 39 certifies fast (`hit_TL=False`); 14 hits the limit (`hit_TL=True`) with a real gap;
-   57 in between.
+| grid | solver | CE F_opt | CE changes | LB | gap% | certified | wall s | hit_TL |
+|------|--------|---------:|------------|-----:|-----:|-----------|-------:|--------|
+| **IEEE 39** | **node** | **0.7060** | L13:+2.819 | 0.7060 | **0.0008** | ✅ **yes** | 599 | no |
+| IEEE 39 | coordinator | 0.7138 | L13:+2.850 | 0.7060 | 1.09 | no | 3612 | yes |
+| **IEEE 57** | **node** | **10.390** | L20:+19.9; L69:+33.7 | 9.874 | **4.97** | no | 3604 | yes |
+| IEEE 57 | coordinator | 11.680 | L20:+13.1; L69:+41.5 | 8.475 | 27.44 | no | 3638 | yes |
+| **IEEE 14** | **node** | **2.382** | L14:+6.8; L15:+7.6; L18:+2.9 | 1.633 | **31.44** | no | 3605 | yes |
+| IEEE 14 | coordinator | 2.382 | (same) | 1.625 | 31.77 | no | 3607 | yes |
 
-**Calibration note:** `node` pays root OBBT once (efficient); `coordinator` rebuilds the master
-(incl. OBBT ~480 s on IEEE 39) PER box, so `--per-box-budget` must exceed that → use ≥600 s.
+**Findings:** IEEE 39 (node) **certifies 0% in ~10 min** (minimal CE = expand line 13 by +2.82). The
+**`node` solver is the sequential winner** (39 cert; 57 ~5%; 14 ~31%); `coordinator` is worse on one
+machine because it rebuilds the master (incl. OBBT ~480 s on 39) PER box — it only pays off with
+CONCURRENT boxes on HPC. IEEE 14 & 57 hit the 1 h limit ⇒ they need the parallel Leftraru budget to
+certify. `--per-box-budget` must exceed the per-box OBBT (~480 s on 39) → keep ≥600 s.
 
 ## 5. Key levers / facts (so you don't re-derive them)
 
