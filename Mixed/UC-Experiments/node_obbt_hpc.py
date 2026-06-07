@@ -78,16 +78,32 @@ def build_grid(grid):
         u_init=u_init, p_init=p_init, on_t=on_t, off_t=off_t,
         foil_extra_constr_fn=foil_fn, output_flag=0,
     )
+    # The warm-start hint MUST be the Branch-&-Sandwich CE (the pre-DECOMP B&S
+    # phase): load bs_<grid>_checkpoint.json. If it is missing we fall back to bU
+    # (max expansion) — NOT a B&S CE — and flag it LOUDLY so a run can never
+    # silently skip the B&S phase. hint_source + the B&S scalars are returned so
+    # the coordinator can record the hint value and the hint gap.
     ckpt = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         f"bs_{grid}_checkpoint.json")
+    bs_best_F = bs_LB = None
     if os.path.exists(ckpt):
-        b_hint = np.array(json.load(open(ckpt))["best_b"], float)
+        _bs = json.load(open(ckpt))
+        b_hint = np.array(_bs["best_b"], float)
+        hint_source = "bs_checkpoint"
+        bs_best_F = _bs.get("best_F")          # B&S incumbent CE cost
+        bs_LB = _bs.get("global_LB")           # B&S own lower bound (its internal gap)
     else:
         b_hint = b0.copy(); b_hint[free_idx] = bU[free_idx]
+        hint_source = "bU_fallback"
+        print(f"[build_grid] *** WARNING: bs_{grid}_checkpoint.json NOT FOUND — the hint "
+              f"fell back to bU (max expansion), which is NOT a Branch-&-Sandwich CE. The "
+              f"B&S phase is effectively SKIPPED. Restore the checkpoint before trusting "
+              f"this run. ***")
     run_kwargs = dict(window_size=T, per_bus_neutrality=True, u_init=u_init,
                       p_init=p_init, on_time_init=on_t, off_time_init=off_t)
     return dict(DATA=DATA, idx=idx, cvec=cvec, b0=b0, foil_fn=foil_fn, w=w,
                 oracle=oracle, free_idx=list(free_idx), bL=bL, bU=bU, b_hint=b_hint,
+                hint_source=hint_source, bs_best_F=bs_best_F, bs_LB=bs_LB,
                 run_kwargs=run_kwargs)
 
 

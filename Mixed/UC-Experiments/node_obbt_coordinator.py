@@ -75,18 +75,32 @@ def cmd_init(args):
             "hi": {int(e): float(bU[e]) for e in free},
             "lb": None, "warm": {int(e): float(bh[e]) for e in free},
             "status": "open", "best_F": None, "best_b": None}
+    # B&S hint provenance (record the hint value + B&S's own gap, and prove the
+    # hint really is the Branch-&-Sandwich CE rather than the bU fallback).
+    bs_best_F = g.get("bs_best_F"); bs_LB = g.get("bs_LB")
+    bs_gap_pct = (100.0 * (bs_best_F - bs_LB) / abs(bs_best_F)
+                  if (bs_best_F not in (None, 0) and bs_LB is not None) else None)
     st = {"grid": args.grid, "tol": args.tol, "next_id": 1, "round": 0,
           "budget": args.budget, "seed_interp": args.seed_interp,
           "max_iter": args.max_iter, "split_k": args.split_k,
           "time_limit": args.time_limit,   # GLOBAL wall-clock budget for run-local
           "free_idx": [int(e) for e in free],
           "hint_F": hint_F, "global_UB": hint_F,
+          "hint_source": g.get("hint_source"),   # "bs_checkpoint" | "bU_fallback"
+          "bs_best_F": bs_best_F, "bs_LB": bs_LB, "bs_gap_pct": bs_gap_pct,
           "global_UB_b": [float(x) for x in bh],
           "boxes": [root]}
     os.makedirs(args.outdir, exist_ok=True)
     _save(args.outdir, st)
+    src = g.get("hint_source")
     print(f"[init] grid=IEEE{args.grid}  free={len(free)}  hint_F={hint_F:.4f}  "
-          f"root box id=0 (open).  Next: solve-box 0, then step.")
+          f"hint_source={src}"
+          + (f"  (B&S: F={bs_best_F:.4f} LB={bs_LB:.4f} gap={bs_gap_pct:.2f}%)"
+             if bs_gap_pct is not None else "")
+          + f"\n       root box id=0 (open).  Next: solve-box 0, then step.")
+    if src != "bs_checkpoint":
+        print("[init] *** WARNING: hint is NOT the Branch-&-Sandwich CE — the B&S phase "
+              "was skipped (missing bs checkpoint). ***")
 
 
 def cmd_solve_box(args):
@@ -224,6 +238,16 @@ def cmd_status(args):
           f"(open={n['open']} solved={n['solved']} pruned={n['pruned']} internal={n['internal']})")
     print(f"  global_LB = {gLB:.6f}   global_UB = {gUB:.6f} (hint_F={st['hint_F']:.4f})")
     print(f"  gap = {100*gap:.2f}%" + ("   ✅ CERTIFIED" if gUB - gLB <= st["tol"] else ""))
+    # Hint provenance + the hint's own optimality gap vs the proven LB (how far the
+    # Branch-&-Sandwich CE sits above F* — the publishable "B&S suboptimality").
+    hint_F = st.get("hint_F"); src = st.get("hint_source", "?")
+    hint_gap_str = ("n/a (no box solved yet)" if (hint_F in (None, 0) or gLB < -1e17)
+                    else f"{100 * (hint_F - gLB) / abs(hint_F):.2f}%")
+    print(f"  hint: F={hint_F:.6f}  source={src}  gap_vs_LB={hint_gap_str}"
+          + (f"   [B&S own: F={st['bs_best_F']:.4f} LB={st['bs_LB']:.4f} gap={st['bs_gap_pct']:.2f}%]"
+             if st.get("bs_gap_pct") is not None else ""))
+    if src != "bs_checkpoint":
+        print("  *** WARNING: hint is NOT the B&S CE (B&S phase skipped) ***")
     if "wall_time_s" in st:
         print(f"  wall_time = {st['wall_time_s']:.1f}s   hit_time_limit = {st.get('hit_time_limit')}"
               + (f"  (limit {st['time_limit']:.0f}s)" if st.get("time_limit") else ""))

@@ -24,12 +24,16 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-GRID="${1:?usage: run_coordinator_leftraru.sh <grid> <rundir> [budget] [split_k] [max_rounds] [tol]}"
+GRID="${1:?usage: run_coordinator_leftraru.sh <grid> <rundir> [budget] [split_k] [max_rounds] [tol] [maxconc]}"
 RUNDIR="${2:?need a run directory, e.g. runs/c14}"
 BUDGET="${3:-600}"        # per-box wall budget (s); MUST exceed per-box OBBT (~480s on IEEE 39) -> >=600
 SPLIT_K="${4:-4}"         # # weakest leaves split per round = next round's parallel width
 MAX_ROUNDS="${5:-12}"     # safety cap on rounds
 TOL="${6:-1e-3}"          # absolute UB-LB gap for certification
+MAXCONC="${7:-11}"        # max array tasks running AT ONCE. NLHPC grant = 88 cores;
+                          # node_obbt_round.slurm asks 8 cpus/task -> 88/8 = 11 concurrent.
+                          # The %MAXCONC throttle GUARANTEES the run never exceeds the grant
+                          # (extra boxes queue and run as slots free — correct, just serial).
 
 PY="${PY:-python}"        # override with PY=/path/to/ce-env/python if conda isn't pre-activated
 COORD="node_obbt_coordinator.py"
@@ -73,9 +77,10 @@ for ((r=1; r<=MAX_ROUNDS; r++)); do
   if [[ -z "$IDS" ]]; then
     echo "[driver] no OPEN boxes left (all pruned/solved) — stopping."; break
   fi
-  echo "[driver] round ${r}: submitting array --array=${IDS}  (budget ${BUDGET}s/box)"
-  # --wait blocks until every array task finishes; pass BUDGET so the .slurm --time is honored upstream
-  sbatch --wait --array="${IDS}" "$SLURM" "$RUNDIR"
+  echo "[driver] round ${r}: submitting array --array=${IDS}%${MAXCONC}  (budget ${BUDGET}s/box, <=${MAXCONC} concurrent => <=$((MAXCONC*8)) cores)"
+  # --wait blocks until every array task finishes; %MAXCONC caps simultaneously
+  # running tasks so the run stays within the 88-core NLHPC grant.
+  sbatch --wait --array="${IDS}%${MAXCONC}" "$SLURM" "$RUNDIR"
   echo "[driver] round ${r}: array done — running step (prune + split ${SPLIT_K} weakest)"
   "$PY" "$COORD" step "$RUNDIR"
 done
