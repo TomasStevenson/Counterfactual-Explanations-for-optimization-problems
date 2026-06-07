@@ -30,13 +30,18 @@
 set -euo pipefail
 RUNDIR="${1:?usage: sbatch --array=<open ids> node_obbt_round.slurm <rundir>}"
 
-# --- environment (adjust to your Leftraru setup) ---------------------------
-# source ~/miniconda3/etc/profile.d/conda.sh && conda activate ce-env
-export PYTHONPATH="${GUROBI_HOME:-$HOME/gurobi}/lib/python:${PYTHONPATH:-}"
-export GRB_LICENSE_FILE="${GRB_LICENSE_FILE:-$HOME/gurobi.lic}"
+# --- environment (NLHPC Leftraru; verified 2026-06-01) ---------------------
+# Partition `main` (AMD EPYC zen4); the gurobi module ships gurobipy but does
+# NOT put it on the path. License = NLHPC central floating token server
+# ("licencias") — no personal license / GRB_LICENSE_FILE needed, works on
+# compute nodes with no internet.
+module load gurobi
+export PYTHONPATH="$GUROBI_HOME/lib/python3.13/site-packages:${PYTHONPATH:-}"
+# If numpy is missing from the module's python, activate your own env too, e.g.:
+#   source ~/miniconda3/etc/profile.d/conda.sh && conda activate ce-env
 export PYTHONIOENCODING=utf-8
 export PYTHONUTF8=1
-export GRB_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+export GRB_THREADS="${SLURM_CPUS_PER_TASK:-8}"   # NLHPC policy: cap Threads to the allocation
 
 echo "[round task ${SLURM_ARRAY_TASK_ID}] host=$(hostname) rundir=${RUNDIR}"
 srun python node_obbt_coordinator.py solve-box "${RUNDIR}" "${SLURM_ARRAY_TASK_ID}"
