@@ -6,9 +6,9 @@
 #
 #   sbatch run_pipeline.slurm <grid> [time_limit_s] [per_box_s] [bs_nodes]
 # e.g.
-#   sbatch run_pipeline.slurm 39 3600 600 1500
-#   sbatch run_pipeline.slurm 57 7200 600 10
-#   sbatch run_pipeline.slurm 14 7200 600 1200
+#   sbatch run_pipeline.slurm 39 3600 600 250
+#   sbatch run_pipeline.slurm 57 7200 600 250
+#   sbatch run_pipeline.slurm 14 7200 600 250
 #
 # One task, 8 cores. Three grids at once = 24 cores, well within the 88-core
 # grant, so you can submit all three simultaneously. Result + timing land in
@@ -27,7 +27,7 @@ set -euo pipefail
 GRID="${1:?usage: sbatch run_pipeline.slurm <grid> [time_limit_s] [per_box_s] [bs_nodes]}"
 TL="${2:-3600}"
 PERBOX="${3:-600}"
-BSNODES="${4:-300}"
+BSNODES="${4:-250}"     # B&S node cap (default 250 for all grids; a warm start needs no more)
 
 # --- environment (NLHPC Leftraru; same as the other slurm files) -----------
 module load gurobi
