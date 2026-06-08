@@ -42,6 +42,11 @@ export PYTHONPATH="$GUROBI_HOME/lib/python3.13/site-packages:${PYTHONPATH:-}"
 export PYTHONIOENCODING=utf-8
 export PYTHONUTF8=1
 export GRB_THREADS="${SLURM_CPUS_PER_TASK:-8}"   # NLHPC policy: cap Threads to the allocation
+# Real cap is ./gurobi.env (Threads 8 -> every model). Also cap numpy/BLAS:
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+export NUMEXPR_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
 echo "[round task ${SLURM_ARRAY_TASK_ID}] host=$(hostname) rundir=${RUNDIR}"
 srun python node_obbt_coordinator.py solve-box "${RUNDIR}" "${SLURM_ARRAY_TASK_ID}"

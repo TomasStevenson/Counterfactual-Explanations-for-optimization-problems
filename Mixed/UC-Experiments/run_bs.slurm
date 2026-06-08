@@ -35,6 +35,12 @@ export PYTHONPATH="$GUROBI_HOME/lib/python3.13/site-packages:${PYTHONPATH:-}"
 export PYTHONIOENCODING=utf-8
 export PYTHONUTF8=1
 export GRB_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+# Real Gurobi cap lives in ./gurobi.env (Threads 8 -> every model). B&S is the
+# uncapped phase that got the pipeline flagged, so this matters most here.
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+export NUMEXPR_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
 echo "[bs_phase] grid=IEEE${GRID} max_nodes=${NODES} fresh='${FRESH_FLAG}' host=$(hostname)"
 srun python run_bs.py "${GRID}" --max-nodes "${NODES}" ${FRESH_FLAG}

@@ -8,7 +8,11 @@
 # e.g.
 #   sbatch run_pipeline.slurm 39 3600 600 250
 #   sbatch run_pipeline.slurm 57 7200 600 250
-#   sbatch run_pipeline.slurm 14 7200 600 250
+#   sbatch run_pipeline.slurm 14 7200 600 0     # bs_nodes=0 -> skip B&S, reuse cached F=2.382 hint
+#
+# bs_nodes: B&S node cap; pass 0 (or "skip"/"cached") to SKIP the live B&S phase
+# and reuse the committed bs_<grid>_checkpoint.json. Use 0 for IEEE 14 — its good
+# F=2.382 CE needs ~1144 nodes, so the 250-node default degrades it to F=4.467.
 #
 # One task, 8 cores. Three grids at once = 24 cores, well within the 88-core
 # grant, so you can submit all three simultaneously. Result + timing land in
@@ -35,7 +39,20 @@ export PYTHONPATH="$GUROBI_HOME/lib/python3.13/site-packages:${PYTHONPATH:-}"
 export PYTHONIOENCODING=utf-8
 export PYTHONUTF8=1
 export GRB_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+# Real Gurobi cap lives in ./gurobi.env (Threads 8 -> every model: B&S, master, OBBT/dispatch LPs).
+# GRB_THREADS above only reaches the DECOMP master. Also stop numpy/BLAS oversubscribing:
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
+export NUMEXPR_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
-echo "[pipeline] grid=IEEE${GRID}  time_limit=${TL}s  per_box=${PERBOX}s  bs_nodes=${BSNODES}  host=$(hostname)"
-srun python run_pipeline.py "${GRID}" --time-limit "${TL}" --per-box "${PERBOX}" --bs-nodes "${BSNODES}"
+# bs_nodes 0 / "skip" / "cached" => reuse the committed checkpoint, no live recompute.
+if [[ "${BSNODES}" == "0" || "${BSNODES}" == "skip" || "${BSNODES}" == "cached" ]]; then
+  BS_ARG="--skip-bs"
+else
+  BS_ARG="--bs-nodes ${BSNODES}"
+fi
+
+echo "[pipeline] grid=IEEE${GRID}  time_limit=${TL}s  per_box=${PERBOX}s  bs=${BS_ARG}  host=$(hostname)"
+srun python run_pipeline.py "${GRID}" --time-limit "${TL}" --per-box "${PERBOX}" ${BS_ARG}
 echo "[pipeline] done -> pipeline_results/pipeline_${GRID}.json"

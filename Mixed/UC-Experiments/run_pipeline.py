@@ -52,9 +52,30 @@ def run_bs_phase(grid, max_nodes, fresh=True):
                   compute_final_mip_lb=False)
 
 
+def load_cached_bs(grid):
+    """--skip-bs path: reuse the committed bs_<grid>_checkpoint.json as the hint
+    WITHOUT recomputing B&S. Returns a bs-like dict for the record. Errors if the
+    checkpoint is missing — skipping B&S with no checkpoint makes build_grid fall
+    back to bU (NOT a real CE). Motivation: IEEE 14's good F=2.382 CE needs ~1144
+    B&S nodes; the pipeline's default 250-node cap finds a worse 6-line F=4.467
+    hint, which then caps DECOMP. Reusing the cached certified CE restores the UB."""
+    ckpt = os.path.join(HERE, f"bs_{grid}_checkpoint.json")
+    if not os.path.exists(ckpt):
+        raise FileNotFoundError(
+            f"--skip-bs needs an existing {ckpt}; none found. Restore it first "
+            f"(e.g. `git checkout -- bs_{grid}_checkpoint.json`), or drop --skip-bs "
+            f"to recompute B&S live.")
+    ck = json.load(open(ckpt))
+    bestF, LB = ck.get("best_F"), ck.get("global_LB")
+    certified = (bestF is not None and LB is not None and abs(bestF - LB) <= 1e-3)
+    return dict(F_opt=bestF, global_LB=LB, nodes=ck.get("nodes_processed"),
+                certified=certified, success=(ck.get("best_b") is not None), cached=True)
+
+
 def run_decomp_phase(grid, time_limit, per_box):
-    """Phase 2 — the in-process node-OBBT certifier, warm-started by the fresh
-    B&S hint (build_grid re-reads the checkpoint B&S just wrote)."""
+    """Phase 2 — the in-process node-OBBT certifier, warm-started by the B&S hint
+    (build_grid re-reads bs_<grid>_checkpoint.json — whatever phase 1 left there,
+    or the cached checkpoint when --skip-bs was used)."""
     g = build_grid(grid)
     dec = _make_decomp(g, g["bL"], g["bU"], per_box, SEED_INTERP.get(grid, 0),
                        max_iter=1000, node=True, max_nodes=10**9, time_limit=time_limit)
@@ -69,6 +90,11 @@ def main():
     ap.add_argument("--bs-nodes", type=int, default=300, help="B&S node budget")
     ap.add_argument("--no-fresh-bs", action="store_true",
                     help="resume/extend the existing B&S checkpoint instead of a new tree")
+    ap.add_argument("--skip-bs", action="store_true",
+                    help="skip the live B&S phase entirely; reuse the committed "
+                         "bs_<grid>_checkpoint.json as the DECOMP hint (no recompute). "
+                         "Use for IEEE 14 — its good F=2.382 CE needs ~1144 B&S nodes "
+                         "and the default 250-node cap degrades it to F=4.467.")
     ap.add_argument("--outdir", default="pipeline_results")
     args = ap.parse_args()
 
@@ -77,13 +103,20 @@ def main():
 
     # ---- Phase 1: B&S warm-start cycle (timed) ----
     t0 = time.time()
-    bs = run_bs_phase(args.grid, args.bs_nodes, fresh=not args.no_fresh_bs)
-    t_bs = time.time() - t0
+    if args.skip_bs:
+        bs = load_cached_bs(args.grid)
+        t_bs = time.time() - t0
+        print(f"[pipeline] B&S SKIPPED (--skip-bs): reusing cached "
+              f"bs_{args.grid}_checkpoint.json  F={bs.get('F_opt')}  LB={bs.get('global_LB')}  "
+              f"nodes={bs.get('nodes')}  certified={bs.get('certified')}", flush=True)
+    else:
+        bs = run_bs_phase(args.grid, args.bs_nodes, fresh=not args.no_fresh_bs)
+        t_bs = time.time() - t0
+        print(f"[pipeline] B&S done: {t_bs:.1f}s  F={bs.get('F_opt')}  LB={bs.get('global_LB')}  "
+              f"nodes={bs.get('nodes')}  certified={bs.get('certified')}", flush=True)
     bs_F = bs.get("F_opt"); bs_LB = bs.get("global_LB")
-    print(f"[pipeline] B&S done: {t_bs:.1f}s  F={bs_F}  LB={bs_LB}  "
-          f"nodes={bs.get('nodes')}  certified={bs.get('certified')}", flush=True)
     if not bs.get("success"):
-        print("[pipeline] *** WARNING: B&S found NO CE — DECOMP hint falls back to bU. ***", flush=True)
+        print("[pipeline] *** WARNING: no B&S CE available — DECOMP hint falls back to bU. ***", flush=True)
 
     # ---- Phase 2: DECOMP certifier (timed) ----
     t1 = time.time()
