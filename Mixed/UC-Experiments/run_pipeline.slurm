@@ -46,6 +46,17 @@ export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export NUMEXPR_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
+# --- campaign knobs (optional; unset => certified baseline) -----------------
+#   CE_THR=0.6           lower threshold => more mutable lines (line-count scaling)
+#   CE_SCALE_DOWN=0.8    symmetric -20% box (negative perturbation); 1.0 = positive-only
+#   CE_CARBON57=off      drop IEEE 57's carbon price (57 only); default on
+#   OUTDIR=...           per-cell results dir so experiments don't overwrite each other
+export CE_THR="${CE_THR:-0.75}"
+export CE_SCALE_DOWN="${CE_SCALE_DOWN:-1.0}"
+export CE_SCALE_UP="${CE_SCALE_UP:-1.2}"
+export CE_CARBON57="${CE_CARBON57:-on}"
+OUTDIR="${OUTDIR:-pipeline_results}"
+
 # bs_nodes 0 / "skip" / "cached" => reuse the committed checkpoint, no live recompute.
 if [[ "${BSNODES}" == "0" || "${BSNODES}" == "skip" || "${BSNODES}" == "cached" ]]; then
   BS_ARG="--skip-bs"
@@ -54,5 +65,6 @@ else
 fi
 
 echo "[pipeline] grid=IEEE${GRID}  time_limit=${TL}s  per_box=${PERBOX}s  bs=${BS_ARG}  host=$(hostname)"
-srun python run_pipeline.py "${GRID}" --time-limit "${TL}" --per-box "${PERBOX}" ${BS_ARG}
-echo "[pipeline] done -> pipeline_results/pipeline_${GRID}.json"
+echo "[pipeline] knobs: CE_THR=${CE_THR}  box=[${CE_SCALE_DOWN},${CE_SCALE_UP}]*b0  CE_CARBON57=${CE_CARBON57}  outdir=${OUTDIR}"
+srun python run_pipeline.py "${GRID}" --time-limit "${TL}" --per-box "${PERBOX}" ${BS_ARG} --outdir "${OUTDIR}"
+echo "[pipeline] done -> ${OUTDIR}/pipeline_${GRID}.json"

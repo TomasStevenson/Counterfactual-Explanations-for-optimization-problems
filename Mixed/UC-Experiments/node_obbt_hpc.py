@@ -45,10 +45,15 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Data")
 _FNAME = {"14": "ieee14_enhanced.json", "39": "ieee39_newengland.json",
           "57": "ieee57_uc_matpower.json"}
 # Per-grid quick_setup — MUST MATCH build_decomp_notebook.py / _smoke_strongdual.py.
+# CE_CARBON57 (env): set to off/none/0 to DROP IEEE 57's carbon price for the
+# carbon-interaction experiment. 14/39 are already carbon-free, so this only
+# affects 57. Default "on" reproduces the certified baseline.
+_CARBON57 = (None if os.environ.get("CE_CARBON57", "on").strip().lower()
+             in ("off", "none", "0", "false") else 50.0)
 _SETUP = {
-    "14": dict(carbon_price=None, voll=20_000.0, slack_bus=None),
-    "39": dict(carbon_price=None, voll=20_000.0, slack_bus=None),
-    "57": dict(carbon_price=50.0,  voll=500.0,   slack_bus=0),
+    "14": dict(carbon_price=None,      voll=20_000.0, slack_bus=None),
+    "39": dict(carbon_price=None,      voll=20_000.0, slack_bus=None),
+    "57": dict(carbon_price=_CARBON57, voll=500.0,    slack_bus=0),
 }
 
 
@@ -70,9 +75,18 @@ def build_grid(grid):
     e = np.array([float(g.emission_rate) for g in DATA.gens])
     E_fac = float(np.sum(e[:, None] * solF["p"]))
     foil_fn = make_emissions_foil_4b(DATA, alpha=ALPHA, E_factual=E_fac)
-    free_idx, util = get_congested_free_lines(solF, b0, thr=0.75)
-    bL, bU = build_b_bounds(b0, free_idx)
+    # Campaign knobs (env-driven; defaults reproduce the certified baseline exactly):
+    #   CE_THR        line-count axis — congestion threshold; LOWER = more mutable lines (default 0.75)
+    #   CE_SCALE_DOWN negative perturbation — box lower bound = CE_SCALE_DOWN*b0 (1.0 = positive-only, 0.8 = -20%)
+    #   CE_SCALE_UP   box upper bound = CE_SCALE_UP*b0 (default 1.2 = +20%)
+    _thr = float(os.environ.get("CE_THR", "0.75"))
+    _sd = float(os.environ.get("CE_SCALE_DOWN", "1.0"))
+    _su = float(os.environ.get("CE_SCALE_UP", "1.2"))
+    free_idx, util = get_congested_free_lines(solF, b0, thr=_thr)
+    bL, bU = build_b_bounds(b0, free_idx, scale_up=_su, scale_down=_sd)
     w = make_line_weights(DATA, b0, util=util)
+    print(f"[build_grid] IEEE{grid}  CE_THR={_thr:g}  box=[{_sd:g},{_su:g}]*b0  "
+          f"carbon57={_SETUP['57']['carbon_price']}  free_lines={len(free_idx)}", flush=True)
     oracle = UCWeakWCEOracle(
         data=DATA, cvec=cvec, idx=idx, window_size=T, per_bus_neutrality=True,
         u_init=u_init, p_init=p_init, on_t=on_t, off_t=off_t,

@@ -28,10 +28,13 @@ def get_congested_free_lines(sol0, b0, thr=0.75):
     return idx_cong, util
 
 
-def build_b_bounds(b0, b_free_idx, scale_up=1.2):
+def build_b_bounds(b0, b_free_idx, scale_up=1.2, scale_down=1.0):
+    # scale_down=1.0 -> lower bound pinned at b0 (positive-only, the baseline).
+    # scale_down=0.8 -> symmetric -20% box (negative perturbation experiment).
     bL = b0.copy(); bU = b0.copy()
     for ell in b_free_idx:
         bU[ell] = scale_up * b0[ell]
+        bL[ell] = scale_down * b0[ell]
     return bL, bU
 
 
