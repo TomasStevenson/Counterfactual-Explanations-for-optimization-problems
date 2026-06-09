@@ -61,6 +61,11 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# Gurobi / DECOMP transient solver artifacts (IIS dumps, model exports)
+*.ilp
+*.lp
+gurobi.log
+
 # Flask stuff:
 instance/
 .webassets-cache
@@ -127,3 +132,12 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# --- UC-Experiments runtime / solver artifacts (regenerated each run; do not track) ---
+#   NOTE: bs_*_checkpoint.json (B&S warm-start hints), pipeline_results/, and
+#   benchmark_results/results.{csv,json} are deliberately committed and NOT ignored.
+_cache_*.pkl
+decomp_*checkpoint*.json
+Mixed/UC-Experiments/runs/
+Mixed/UC-Experiments/benchmark_smoke*/
+Mixed/UC-Experiments/benchmark_results/coord_*/
