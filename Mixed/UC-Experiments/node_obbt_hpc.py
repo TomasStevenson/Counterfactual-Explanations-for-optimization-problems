@@ -98,11 +98,19 @@ def build_grid(grid):
     bs_best_F = bs_LB = None
     if os.path.exists(ckpt):
         _bs = json.load(open(ckpt))
-        b_hint = np.array(_bs["best_b"], float)
-        hint_source = "bs_checkpoint"
-        bs_best_F = _bs.get("best_F")          # B&S incumbent CE cost
-        bs_LB = _bs.get("global_LB")           # B&S own lower bound (its internal gap)
+        _best_b = _bs.get("best_b")
+        bs_best_F = _bs.get("best_F")
+        bs_LB = _bs.get("global_LB")
+        if _best_b is not None:
+            b_hint = np.array(_best_b, float)
+            hint_source = "bs_checkpoint"
+        else:
+            b_hint = b0.copy(); b_hint[free_idx] = bU[free_idx]
+            hint_source = "bU_fallback"
+            print(f"[build_grid] *** WARNING: bs_{grid}_checkpoint.json has no feasible CE "
+                  f"(best_b=null) — hint falls back to bU. ***", flush=True)
     else:
+        bs_best_F = bs_LB = None
         b_hint = b0.copy(); b_hint[free_idx] = bU[free_idx]
         hint_source = "bU_fallback"
         print(f"[build_grid] *** WARNING: bs_{grid}_checkpoint.json NOT FOUND — the hint "
