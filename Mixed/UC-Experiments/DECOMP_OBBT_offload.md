@@ -330,8 +330,8 @@ results table), this offload doc (§7 above for the pivot), then
 - `_smoke_strongdual.py` — extend args slot 6 likewise. Full smoke run with B&S hint.
 - `_diagnose_stall` (already in `uc_decomp_4b.py`) — fires at cycle-halt; should show
   reduced inflation post-OBBT.
-- `_verify_strongdual.py` — dual_obj algebra regression; unchanged.
-- `_measure_flow_duals.py` — re-run after OBBT to compare observed `μ` vs the new
+- `dev/_verify_strongdual.py` — dual_obj algebra regression; unchanged.
+- `dev/_measure_flow_duals.py` — re-run after OBBT to compare observed `μ` vs the new
   OBBT-derived UB.
 
 ---

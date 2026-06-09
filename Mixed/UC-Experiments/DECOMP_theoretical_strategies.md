@@ -69,7 +69,7 @@ version: the bound is derived from the master's own constraints, so it's provabl
 
 **Expected effect.** The McCormick width at b in segment of width `Δb` is bounded by
 `Δb · (μ_UB − μ_LB) / 4`. Halving `μ_UB` halves the envelope (and the spatial-B&B search
-volume per node). For our problem `_measure_flow_duals.py` showed observed `μ` is 16–81×
+volume per node). For our problem `dev/_measure_flow_duals.py` showed observed `μ` is 16–81×
 smaller than the provable `M_mu`; OBBT should recover most of that gap *validly* — i.e.
 what `mccormick_mu_factor` *almost* did, but provably correct.
 
@@ -354,7 +354,7 @@ foil at `b_k` is simply not in the cut set.
 
 ## 7. Strict vs tolerant CE — the UB axis is not free (2026-05-30, hybrid experiment)
 
-Tested **Strategy 6 (hybrid)** on IEEE 14 (`_hybrid_obbt.py`): Stage A runs bigM to
+Tested **Strategy 6 (hybrid)** on IEEE 14 (`dev/_hybrid_obbt.py`): Stage A runs bigM to
 drive the UB, Stage B runs strongdual+bilinear_exact+OBBT (hinted by Stage A's CE) for
 the valid LB. The intent: a better incumbent both lowers the UB *and* tightens the
 master's `F ≤ F_hint` cap, which can only raise ObjBound (smaller feasible region ⇒

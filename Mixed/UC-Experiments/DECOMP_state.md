@@ -75,7 +75,7 @@ def __init__(
 - `"indicator"`: `z=1 → dual=0`, `z=0 → slack=0` — binary per pair, M-free, enforced via B&B branching (does NOT loosen LP). Same z-convention as `"bigM"` so `_analytic_warm_start` works for either mode.
 - `"sos1"`: `SOS1({dual, slack})` — no binary, no M ← **DOES NOT WORK** (see Bug 5)
 - `"hybrid"`: bigM for pairs with bilinear slack (free-line flow limits, where `slack = b[ell] ± f^j` involves master variable `b[ell]`); indicator for everything else (constant-RHS pairs). See `DECOMP_lb_stagnation.md` Fix 1. **TESTED 2026-05-28 — did NOT close the gap** (IEEE 14: 50.94% bigM → 51.00% hybrid; IEEE 39/57 stay at LB=0). The binding looseness is the bilinear flow complementarity, which hybrid leaves as bigM.
-- `"strongdual"`: Fix 2 — drops ALL complementarity binaries; enforces dispatch-LP optimality via one strong-duality equality `lp_var = dual_obj` + primal feas + stationarity. Bilinear dual term `−Σ b[ell]·(μ_p+μ_m)` (free lines) linearised with McCormick `w = b·μ`; `μ` capped at `M_mu`. Only integer vars left are `u_foil`. **CRITICAL — the equality is `lp_var == dual_obj`, NOT `lp_var + lp_const`.** `dual_obj` is the dual optimum of the *dispatch LP*, whose objective is the variable cost only (`p/shed/curt/sp/sm` = `lp_var`); `lp_const` is the commitment cost (`u,v,w`), a *constant* of the dispatch LP and absent from its objective. First implementation wrongly used `lp_var+lp_const`, which over-constrained the master by the (nonzero) commitment cost and **excluded valid CEs → invalid (too-high) LB / false certification** (IEEE 39 smoke falsely certified F=2.106 when B&S CE=0.714). Caught by `_check_strongdual_valid.py` (`debug_fix_b` at the known CE `b_BS` returned INFEASIBLE). Fixed 2026-05-28. Post-fix validation: `b_BS` feasible with obj=F(b_BS) on IEEE 14 & 39; IEEE 39 smoke LB=0.665 ≤ 0.714 (valid, tight). dual_obj signs verified to 1e-16 (`_verify_strongdual.py`).
+- `"strongdual"`: Fix 2 — drops ALL complementarity binaries; enforces dispatch-LP optimality via one strong-duality equality `lp_var = dual_obj` + primal feas + stationarity. Bilinear dual term `−Σ b[ell]·(μ_p+μ_m)` (free lines) linearised with McCormick `w = b·μ`; `μ` capped at `M_mu`. Only integer vars left are `u_foil`. **CRITICAL — the equality is `lp_var == dual_obj`, NOT `lp_var + lp_const`.** `dual_obj` is the dual optimum of the *dispatch LP*, whose objective is the variable cost only (`p/shed/curt/sp/sm` = `lp_var`); `lp_const` is the commitment cost (`u,v,w`), a *constant* of the dispatch LP and absent from its objective. First implementation wrongly used `lp_var+lp_const`, which over-constrained the master by the (nonzero) commitment cost and **excluded valid CEs → invalid (too-high) LB / false certification** (IEEE 39 smoke falsely certified F=2.106 when B&S CE=0.714). Caught by `_check_strongdual_valid.py` (`debug_fix_b` at the known CE `b_BS` returned INFEASIBLE). Fixed 2026-05-28. Post-fix validation: `b_BS` feasible with obj=F(b_BS) on IEEE 14 & 39; IEEE 39 smoke LB=0.665 ≤ 0.714 (valid, tight). dual_obj signs verified to 1e-16 (`dev/_verify_strongdual.py`).
 
 ### run() flow (current)
 ```
@@ -564,7 +564,7 @@ artifact**:
   F≤1.9563 cap excluded the true strict optimum. The fix gates state refresh on a STRICT
   CE check.
 
-### Strict vs tolerant CE (2026-05-30, `_hybrid_obbt.py`)
+### Strict vs tolerant CE (2026-05-30, `dev/_hybrid_obbt.py`)
 Tested Strategy 6 (hybrid: bigM UB + strongdual/OBBT LB). bigM found F=1.9061 but the
 oracle shows **v_foil − v_plain = +0.22 > 0** → it is NOT a strict CE (foil not optimal
 at that b; passes only because 0.22 ≪ rel-tol ~83). Fed as a hard `F ≤ 1.9061` cap to
@@ -754,7 +754,7 @@ TODO: reconcile the 57 weight computation between the two paths.
 - `uc_decomp_4b.py`: added `obbt`, `obbt_safety`, `obbt_iter`, `eps_ce_strict` ctor args; added `_obbt_root` method (wired into `run()` after seeding); added `_ce_strict` gate for best_F/cap/hint refresh; honest cycle vs `time_limit_undersolved` labeling.
 - `_check_strongdual_valid.py`: added slot-6 "obbt" arg + custom validation path (OBBT runs with b free, then b fixed for feasibility check).
 - `_smoke_strongdual.py`: added slot-6 "obbt", slot-7 master TL, slot-8 max_iter, slot-9 master_output_flag args.
-- `_hybrid_obbt.py`: NEW — Strategy 6 (bigM UB + strongdual/OBBT LB) two-stage experiment.
+- `dev/_hybrid_obbt.py`: NEW — Strategy 6 (bigM UB + strongdual/OBBT LB) two-stage experiment.
 - `build_decomp_notebook.py`: threaded `bilinear_exact` and `obbt` kwargs through `decomp_cell`.
 
 ---

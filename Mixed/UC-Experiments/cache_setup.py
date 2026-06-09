@@ -1,5 +1,5 @@
 """One-shot script: replicate decomp_3grids.ipynb Sections 0-3 for IEEE 14,
-solve B&S CE oracle, pickle everything needed by repro_warmstart.py.
+solve B&S CE oracle, pickle everything needed by dev/repro_warmstart.py.
 
 Run from this directory:
     python cache_setup.py
@@ -159,5 +159,5 @@ size_kb = os.path.getsize(CACHE_PATH) / 1024
 print(f"      OK ({time.time()-t0:.1f}s)  wrote {CACHE_PATH}  ({size_kb:.1f} KB)")
 print()
 print("=" * 60)
-print("Cache built. Now run repro_warmstart.py for fast iteration.")
+print("Cache built. Now run dev/repro_warmstart.py for fast iteration.")
 print("=" * 60)

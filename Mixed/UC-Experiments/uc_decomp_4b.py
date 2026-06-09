@@ -976,7 +976,7 @@ class UCDecomp4b:
         # the dual term  −Σ b[ell]·(μ_p+μ_m)  on FREE lines (b is a master var);
         # we linearise b·μ with McCormick auxiliaries w (= b·μ).  Fixed lines
         # have constant cap=b0 so their term stays linear.
-        # dual_obj verified == c^T x* on IEEE 14 (see _verify_strongdual.py).
+        # dual_obj verified == c^T x* on IEEE 14 (see dev/_verify_strongdual.py).
         if self.comp_mode == "strongdual":
             # mu box for McCormick: μ ∈ [0, M_box].  Default M_box = M_mu (the
             # provable flow-dual bound, Bug 9) — safe but loose (observed μ is
