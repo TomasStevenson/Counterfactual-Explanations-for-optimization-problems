@@ -45,15 +45,11 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Data")
 _FNAME = {"14": "ieee14_enhanced.json", "39": "ieee39_newengland.json",
           "57": "ieee57_uc_matpower.json"}
 # Per-grid quick_setup — MUST MATCH build_decomp_notebook.py / _smoke_strongdual.py.
-# CE_CARBON57 (env): set to off/none/0 to DROP IEEE 57's carbon price for the
-# carbon-interaction experiment. 14/39 are already carbon-free, so this only
-# affects 57. Default "on" reproduces the certified baseline.
-_CARBON57 = (None if os.environ.get("CE_CARBON57", "on").strip().lower()
-             in ("off", "none", "0", "false") else 50.0)
+# carbon_price=0.0 on all grids (carbon-free campaign).
 _SETUP = {
-    "14": dict(carbon_price=None,      voll=20_000.0, slack_bus=None),
-    "39": dict(carbon_price=None,      voll=20_000.0, slack_bus=None),
-    "57": dict(carbon_price=_CARBON57, voll=500.0,    slack_bus=0),
+    "14": dict(carbon_price=0.0, voll=20_000.0, slack_bus=None),
+    "39": dict(carbon_price=0.0, voll=20_000.0, slack_bus=None),
+    "57": dict(carbon_price=0.0, voll=500.0,    slack_bus=0),
 }
 
 
@@ -86,7 +82,7 @@ def build_grid(grid):
     bL, bU = build_b_bounds(b0, free_idx, scale_up=_su, scale_down=_sd)
     w = make_line_weights(DATA, b0, util=util)
     print(f"[build_grid] IEEE{grid}  CE_THR={_thr:g}  box=[{_sd:g},{_su:g}]*b0  "
-          f"carbon57={_SETUP['57']['carbon_price']}  free_lines={len(free_idx)}", flush=True)
+          f"carbon={float(DATA.carbon_price):g}  free_lines={len(free_idx)}", flush=True)
     oracle = UCWeakWCEOracle(
         data=DATA, cvec=cvec, idx=idx, window_size=T, per_bus_neutrality=True,
         u_init=u_init, p_init=p_init, on_t=on_t, off_t=off_t,
