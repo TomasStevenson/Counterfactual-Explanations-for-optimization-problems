@@ -740,8 +740,14 @@ class UCBranchAndSandwichWCE_4b:
         # MIP LB options (opt-in)
         compute_final_mip_lb: bool = False,
         mip_lb_time_limit: float = 900.0,
+        # Optional global wall-clock budget (seconds). None = unbounded (only
+        # max_nodes / tree exhaustion stop the search). Purely additive: the
+        # default reproduces the original behaviour exactly.
+        time_limit: Optional[float] = None,
     ):
         self._node_id = 0
+        t_start = _time.perf_counter()
+        stop_reason = None
         root = BSNode4b(id=0, bL=self.bL0.copy(), bU=self.bU0.copy())
 
         heap: list = []
@@ -783,6 +789,17 @@ class UCBranchAndSandwichWCE_4b:
                     if self.verbose:
                         print(f"[BS] CERTIFIED: gLB={global_LB:.6f} >= bestF={self.best_F:.6f}")
                     certified = True
+                    stop_reason = "certified"
+                    break
+
+                # Global wall-clock budget (opt-in). Break cleanly so the final
+                # LB, checkpoint and result dict are still produced — unlike a
+                # Slurm SIGTERM, which would lose them.
+                if time_limit is not None and (_time.perf_counter() - t_start) > time_limit:
+                    if self.verbose:
+                        print(f"[BS] TIME LIMIT reached ({time_limit:.0f}s) at "
+                              f"node {nodes_processed} — stopping.")
+                    stop_reason = "time_limit"
                     break
 
                 lb_key, _, _, node = heapq.heappop(heap)
@@ -859,8 +876,16 @@ class UCBranchAndSandwichWCE_4b:
         finally:
             self._keepalive.stop()
 
+        if stop_reason is None:
+            stop_reason = ("node_budget" if nodes_processed >= self.max_nodes
+                           else "tree_exhausted")
+
         # ── Final global LB ──────────────────────────────────────────
-        node_budget_exhausted = (not certified) and (nodes_processed >= self.max_nodes) and heap
+        # "Budget exhausted" = stopped by the node OR wall-clock budget with an
+        # incumbent and an open tree (so an opt-in MIP LB is worth computing).
+        node_budget_exhausted = ((not certified)
+                                 and stop_reason in ("node_budget", "time_limit")
+                                 and bool(heap))
 
         global_LB = (min(open_node_lbs.values()) if open_node_lbs
                      else (self.best_F if self.best_b is not None else float("inf")))
@@ -908,6 +933,8 @@ class UCBranchAndSandwichWCE_4b:
             "best_inner_ub":  self.best_inner_ub,
             "certified":      certified,
             "mip_lb_used":    mip_lb_used,
+            "stop_reason":    stop_reason,
+            "wall_time_s":    _time.perf_counter() - t_start,
         }
 
     # ------------------------------------------------------------------

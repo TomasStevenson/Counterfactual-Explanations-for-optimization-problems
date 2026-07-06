@@ -18,7 +18,7 @@ Usage:
   python run_bs.py 39 --max-nodes 300 --fresh    # start B&S from scratch (backs up old ckpt)
   python run_bs.py 57 --max-nodes 1 --out /tmp/t.json   # validation, leaves the real ckpt alone
 """
-import os, json, argparse, shutil
+import os, json, argparse, shutil, time, csv, socket, datetime
 import numpy as np
 import gurobipy as gp
 
@@ -58,6 +58,14 @@ def main():
                     help="start a NEW B&S tree (back up any existing checkpoint)")
     ap.add_argument("--out", default=None,
                     help="checkpoint path (default bs_<grid>_checkpoint.json beside this script)")
+    ap.add_argument("--time-limit", type=float, default=None,
+                    help="global wall-clock budget (s) for the B&S search; D2 compare runs use 7200 "
+                         "(2 h). None = bounded only by --max-nodes / tree exhaustion.")
+    ap.add_argument("--mip-lb", action="store_true",
+                    help="compute a final MIP lower bound to tighten global_LB when the node/time "
+                         "budget is exhausted without certifying (opt-in; adds one Gurobi solve).")
+    ap.add_argument("--results", default=None,
+                    help="directory to write the D2 record: bs_result_<grid>.json + append bs_results.csv")
     args = ap.parse_args()
 
     ckpt = args.out or os.path.join(HERE, f"bs_{args.grid}_checkpoint.json")
@@ -85,20 +93,72 @@ def main():
         checkpoint_path=ckpt,
     )
     rk = g["run_kwargs"]
+    t0 = time.perf_counter()
     res = bs.run(window_size=rk["window_size"], per_bus_neutrality=rk["per_bus_neutrality"],
                  u_init=rk["u_init"], p_init=rk["p_init"],
                  on_t=rk["on_time_init"], off_t=rk["off_time_init"],
-                 compute_final_mip_lb=False)
+                 compute_final_mip_lb=args.mip_lb, time_limit=args.time_limit)
+    wall = res.get("wall_time_s", time.perf_counter() - t0)
 
     F = res.get("F_opt"); gLB = res.get("global_LB")
     gap_pct = (100.0 * (F - gLB) / abs(F)) if (res.get("success") and F not in (None, 0)
                                                and gLB is not None and np.isfinite(gLB)) else float("nan")
+
+    # Reconstruct the CE (mutable-line perturbations vs b0) so the pure-B&S CE is
+    # directly comparable to the pipeline's ce_changes column.
+    b0 = np.asarray(g["b0"], float)
+    b_hat = res.get("b_hat")
+    ce_list = []
+    if b_hat is not None:
+        b_hat = np.asarray(b_hat, float)
+        for ell in list(g["free_idx"]):
+            d = float(b_hat[ell] - b0[ell])
+            if abs(d) > 1e-6:
+                ce_list.append(f"L{ell}:{d:+.3f}")
+    ce_changes = "; ".join(ce_list)
+
     print(f"[run_bs] IEEE{args.grid}: success={res.get('success')}  F_opt={F}  "
           f"LB={gLB}  gap={gap_pct:.2f}%  nodes={res.get('nodes')}  "
-          f"certified={res.get('certified')}\n          checkpoint -> {ckpt}")
+          f"certified={res.get('certified')}  stop={res.get('stop_reason')}  "
+          f"wall={wall:.1f}s\n          n_lines={len(ce_list)}  CE=[{ce_changes}]  "
+          f"checkpoint -> {ckpt}")
     if not res.get("success"):
         print("[run_bs] *** WARNING: B&S found NO counterfactual — DECOMP would fall back "
-              "to bU. Increase --max-nodes or check the instance. ***")
+              "to bU. Increase --max-nodes / --time-limit or check the instance. ***")
+
+    # ── D2 comparison record ──────────────────────────────────────────────────
+    if args.results:
+        os.makedirs(args.results, exist_ok=True)
+        rec = {
+            "grid":            args.grid,
+            "carbon":          float(g["DATA"].carbon_price),
+            "success":         bool(res.get("success")),
+            "F_opt":           F,
+            "global_LB":       gLB,
+            "gap_pct":         gap_pct,
+            "certified":       bool(res.get("certified")),
+            "stop_reason":     res.get("stop_reason"),
+            "nodes":           res.get("nodes"),
+            "max_nodes":       args.max_nodes,
+            "time_limit_s":    args.time_limit,
+            "wall_time_s":     wall,
+            "mip_lb_used":     bool(res.get("mip_lb_used")),
+            "n_lines_changed": len(ce_list),
+            "ce_changes":      ce_changes,
+            "host":            socket.gethostname(),
+            "timestamp":       datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        jpath = os.path.join(args.results, f"bs_result_{args.grid}.json")
+        with open(jpath, "w") as f:
+            json.dump(rec, f, indent=2)
+        cpath = os.path.join(args.results, "bs_results.csv")
+        new_csv = not os.path.exists(cpath)
+        with open(cpath, "a", newline="") as f:
+            wtr = csv.DictWriter(f, fieldnames=list(rec.keys()))
+            if new_csv:
+                wtr.writeheader()
+            wtr.writerow(rec)
+        print(f"[run_bs] D2 record -> {jpath}  (+ appended {cpath})")
 
 
 if __name__ == "__main__":
