@@ -25,8 +25,15 @@ from run_bs import _make_viol_fn          # the identical emission+shed violatio
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Per-grid seed_interp (same as run_benchmark.py): IEEE 39 needs interior seeds;
-# 14/57 dedupe so lean is better.
+# 14/57 dedupe so lean is better. Overridable via CE_SEED_INTERP (env) to sweep
+# IEEE 14, whose bU-fallback DECOMP stalls at the trivial corner without interior
+# patterns b0+a(bU-b0) — the "missing pattern" stall the seeds were built for.
 SEED_INTERP = {"14": 0, "39": 3, "57": 0}
+
+
+def _seed_interp(grid):
+    ov = os.environ.get("CE_SEED_INTERP", "").strip()
+    return int(ov) if ov else SEED_INTERP.get(grid, 0)
 
 
 def run_bs_phase(grid, max_nodes, fresh=True):
@@ -77,7 +84,7 @@ def run_decomp_phase(grid, time_limit, per_box):
     (build_grid re-reads bs_<grid>_checkpoint.json — whatever phase 1 left there,
     or the cached checkpoint when --skip-bs was used)."""
     g = build_grid(grid)
-    dec = _make_decomp(g, g["bL"], g["bU"], per_box, SEED_INTERP.get(grid, 0),
+    dec = _make_decomp(g, g["bL"], g["bU"], per_box, _seed_interp(grid),
                        max_iter=1000, node=True, max_nodes=10**9, time_limit=time_limit)
     return g, dec.run(**g["run_kwargs"])
 
@@ -99,7 +106,8 @@ def main():
     args = ap.parse_args()
 
     print(f"{'#'*70}\n# PIPELINE  IEEE{args.grid}   B&S({args.bs_nodes} nodes) -> "
-          f"DECOMP({args.time_limit:.0f}s, per-box {args.per_box:.0f}s)\n{'#'*70}", flush=True)
+          f"DECOMP({args.time_limit:.0f}s, per-box {args.per_box:.0f}s, "
+          f"seed_interp={_seed_interp(args.grid)})\n{'#'*70}", flush=True)
 
     # ---- Phase 1: B&S warm-start cycle (timed) ----
     t0 = time.time()
