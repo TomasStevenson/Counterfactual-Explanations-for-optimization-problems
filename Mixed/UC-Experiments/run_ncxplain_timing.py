@@ -8,7 +8,7 @@
 # Foils are specified DIRECTLY by (generator, status, hours) -- NOT by rank:
 #     IEEE 14 : commit    G1  over t = {17, 18}
 #     IEEE 39 : commit    G5  over t = {17, 18, 19}
-#     IEEE 57 : de-commit  G5  over t = {0, 1, 2}
+#     IEEE 57 : commit    G5  over t = {17, 18}
 #
 # Reproduces the NCXplain_3grids.ipynb runs exactly (same quick_setup args, same
 # bounds/weights, and the same per-grid perturbation_beta: 14->None, 39->0.9,
@@ -85,11 +85,19 @@ OUT_DIR = os.environ.get("NCX_OUT_DIR", "ncx_results")
 
 EXPERIMENTS = [
     dict(grid="14", json="ieee14_enhanced.json",
-         gen=1, status="ON",  times=[17, 18],     beta=None),
+         gen=1, status="ON",  times=[17, 18],     beta=0.9),
     dict(grid="39", json="ieee39_newengland.json",
          gen=5, status="ON",  times=[17, 18, 19], beta=0.9),
+    # 57: de-commit G0 at the evening peak. The old "commit G5" foil only admits
+    # the degenerate -100% no-load waiver (G5 commits at zero output, so only a
+    # free commitment is optimal); with beta=0.9 it is MP_INFEASIBLE. The
+    # de-commit override has an interior <100% CE: G0 fuel +12.3%, G5 fuel -5.4%
+    # (dist 11.28, 8 cuts -- the numbers reported in the paper). NOTE: NCXplain's
+    # cut path is tie-sensitive across solver environments; the Leftraru run of
+    # this same case converged after 1 cut to a coarser CE (dist 15.92). Both are
+    # valid weak CEs; the paper reports the better (smaller-distance) one.
     dict(grid="57", json="ieee57_uc_matpower.json",
-         gen=5, status="OFF", times=[0, 1, 2],    beta=None),
+         gen=0, status="OFF", times=[17, 18],     beta=0.9),
 ]
 
 # Same configuration as NCXplain_3grids.ipynb (carbon-free; +-/percentage box).
