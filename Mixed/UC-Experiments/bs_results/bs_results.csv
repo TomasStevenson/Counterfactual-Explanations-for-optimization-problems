@@ -1,0 +1,4 @@
+grid,carbon,success,F_opt,global_LB,gap_pct,certified,stop_reason,nodes,max_nodes,time_limit_s,wall_time_s,mip_lb_used,n_lines_changed,ce_changes,host,timestamp
+14,0.0,False,inf,0.0,nan,False,time_limit,934,1000000,7200.0,7218.40029106522,False,0,,mn024,2026-07-06T19:29:12
+57,0.0,True,12.391209694866735,0.0,100.0,False,time_limit,510,1000000,7200.0,7216.742091090884,False,1,L69:+50.000,mn008,2026-07-06T19:57:03
+39,0.0,True,0.5260474333136745,0.0,100.0,False,time_limit,396,1000000,7200.0,7233.343481858727,False,1,L13:+2.100,mn008,2026-07-06T19:57:20

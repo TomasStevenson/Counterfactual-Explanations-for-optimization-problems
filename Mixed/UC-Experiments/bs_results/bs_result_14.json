@@ -1,0 +1,19 @@
+{
+  "grid": "14",
+  "carbon": 0.0,
+  "success": false,
+  "F_opt": Infinity,
+  "global_LB": 0.0,
+  "gap_pct": NaN,
+  "certified": false,
+  "stop_reason": "time_limit",
+  "nodes": 934,
+  "max_nodes": 1000000,
+  "time_limit_s": 7200.0,
+  "wall_time_s": 7218.40029106522,
+  "mip_lb_used": false,
+  "n_lines_changed": 0,
+  "ce_changes": "",
+  "host": "mn024",
+  "timestamp": "2026-07-06T19:29:12"
+}

@@ -1,0 +1,2 @@
+grid,bs_nodes,bs_F,bs_LB,bs_certified,F_opt,master_LB,gap_pct,certified,hit_time_limit,termination_reason,bs_time_s,decomp_time_s,total_time_s,n_lines_changed,ce_changes
+14,100,inf,0.0,False,44.594981635036476,1.630452540151765,96.34386542975771,False,True,time_limit_undersolved,455.20661973953247,7201.644638299942,7656.851384878159,6,L0:+40.000; L2:+26.000; L6:+26.000; L14:+7.800; L15:+7.800; L18:+7.800

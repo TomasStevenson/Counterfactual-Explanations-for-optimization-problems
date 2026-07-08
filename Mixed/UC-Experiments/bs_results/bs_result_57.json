@@ -1,0 +1,19 @@
+{
+  "grid": "57",
+  "carbon": 0.0,
+  "success": true,
+  "F_opt": 12.391209694866735,
+  "global_LB": 0.0,
+  "gap_pct": 100.0,
+  "certified": false,
+  "stop_reason": "time_limit",
+  "nodes": 510,
+  "max_nodes": 1000000,
+  "time_limit_s": 7200.0,
+  "wall_time_s": 7216.742091090884,
+  "mip_lb_used": false,
+  "n_lines_changed": 1,
+  "ce_changes": "L69:+50.000",
+  "host": "mn008",
+  "timestamp": "2026-07-06T19:57:03"
+}
