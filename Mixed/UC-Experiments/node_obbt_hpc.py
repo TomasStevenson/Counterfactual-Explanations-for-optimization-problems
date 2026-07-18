@@ -40,7 +40,7 @@ from _decomp_repro_helpers import (
     get_congested_free_lines, build_b_bounds, make_line_weights, UCWeakWCEOracle,
 )
 
-ALPHA = 0.10
+ALPHA = float(os.environ.get("CE_ALPHA", "0.10"))
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Data")
 _FNAME = {"14": "ieee14_enhanced.json", "39": "ieee39_newengland.json",
           "57": "ieee57_uc_matpower.json"}
@@ -71,6 +71,7 @@ def build_grid(grid):
     e = np.array([float(g.emission_rate) for g in DATA.gens])
     E_fac = float(np.sum(e[:, None] * solF["p"]))
     foil_fn = make_emissions_foil_4b(DATA, alpha=ALPHA, E_factual=E_fac)
+    print(f"[build_grid] IEEE{grid} emissions-reduction foil ALPHA={ALPHA:g}", flush=True)
     # Campaign knobs (env-driven; defaults reproduce the certified baseline exactly):
     #   CE_THR        line-count axis — congestion threshold; LOWER = more mutable lines (default 0.75)
     #   CE_SCALE_DOWN negative perturbation — box lower bound = CE_SCALE_DOWN*b0 (1.0 = positive-only, 0.8 = -20%)
@@ -199,6 +200,14 @@ def cmd_emit(args):
                 hi[int(ell)] = float(edges[ell][combo[d] + 1])
             boxes.append({"lo": lo, "hi": hi})
     os.makedirs(args.outdir, exist_ok=True)
+    if args.adaptive:
+        # Persist the carve incumbent — the driver may find a better STRICT CE
+        # than the hint during the carve (it did: F=1.5110 vs hint 1.7613 on
+        # IEEE14 a05) and emit used to throw it away.
+        _bF = res.get("F_opt"); _bb = res.get("b_hat")
+        json.dump(dict(best_F=(float(_bF) if _bF not in (None, float("inf")) else None),
+                       best_b=(list(map(float, _bb)) if _bb is not None else None)),
+                  open(os.path.join(args.outdir, "incumbent.json"), "w"), indent=2)
     spec = dict(grid=args.grid, n_boxes=len(boxes), mode=mode,
                 split_lines=[int(e) for e in split_lines],
                 budget=args.budget, seed_interp=args.seed_interp,
@@ -239,16 +248,19 @@ def cmd_solve(args):
         box_id=args.box_id, grid=spec["grid"],
         feasible=box_feasible,
         master_LB=(float(res.get("master_LB", 0.0)) if box_feasible else None),
-        best_F=(float(res["best_F"]) if res.get("best_F") not in (None, float("inf"))
+        # Driver run() returns F_opt / b_hat (NOT best_F / best_b — reading the
+        # wrong keys silently reported every in-box CE as None).
+        best_F=(float(res["F_opt"]) if res.get("F_opt") not in (None, float("inf"))
                 else None),
-        best_b=(list(map(float, res["best_b"])) if res.get("best_b") is not None else None),
+        best_b=(list(map(float, res["b_hat"])) if res.get("b_hat") is not None else None),
         termination=term,
         box_lo=bx["lo"], box_hi=bx["hi"],
     )
     json.dump(out, open(os.path.join(args.outdir, f"result_{args.box_id:04d}.json"), "w"),
               indent=2)
-    print(f"[solve] box {args.box_id}: LB={out['master_LB']:.4f}  best_F={out['best_F']}  "
-          f"term={out['termination']}")
+    _lb = out["master_LB"]
+    print(f"[solve] box {args.box_id}: LB={_lb if _lb is None else format(_lb, '.4f')}  "
+          f"best_F={out['best_F']}  term={out['termination']}")
 
 
 # --------------------------------------------------------------------------- #
@@ -289,6 +301,13 @@ def cmd_aggregate(args):
     bh = g0["b_hint"]; b0 = g0["b0"]; w = g0["w"]; free = g0["free_idx"]
     hint_F = float(sum(w[ell] * abs(bh[ell] - b0[ell]) for ell in free))
     ce = [r for r in feas if r["best_F"] is not None]
+    # A carve incumbent saved by emit (incumbent.json) is one more UB candidate;
+    # if it wins the min it goes through the same oracle re-verification below.
+    _inc_p = os.path.join(args.outdir, "incumbent.json")
+    if os.path.exists(_inc_p):
+        _inc = json.load(open(_inc_p))
+        if _inc.get("best_F") is not None and _inc.get("best_b") is not None:
+            ce.append(dict(best_F=float(_inc["best_F"]), best_b=_inc["best_b"]))
     box_UB = min((r["best_F"] for r in ce), default=float("inf"))
     global_UB = min(hint_F, box_UB)
     best = min(ce, key=lambda r: r["best_F"]) if ce else None

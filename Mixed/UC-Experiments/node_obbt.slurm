@@ -23,21 +23,19 @@
 #SBATCH --array=0-15                  # MUST equal 0..(n_boxes-1) from `emit`
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8             # Gurobi threads per box (see THREADS below)
-#SBATCH --mem=8G
-#SBATCH --time=02:00:00               # >= max_iter * per-box budget, with margin
+#SBATCH --mem=12G
+#SBATCH --time=00:50:00               # >= max_iter * per-box budget, with margin
 #SBATCH --output=runs/%x_%A_%a.out
 #SBATCH --error=runs/%x_%A_%a.err
 
 set -euo pipefail
 RUNDIR="${1:?usage: sbatch --array=0-N node_obbt.slurm <rundir>}"
 
-# --- environment (adjust to your Leftraru module/conda setup) --------------
-# module load Python/3.x  gurobi/xx.x          # if NLHPC provides Gurobi as a module
-# OR activate your env that has gurobipy on PYTHONPATH:
-# source ~/miniconda3/etc/profile.d/conda.sh && conda activate ce-env
-export PYTHONPATH="${GUROBI_HOME:-$HOME/gurobi}/lib/python:${PYTHONPATH:-}"
-# Token-server (floating) license — point at your NLHPC gurobi.lic:
-export GRB_LICENSE_FILE="${GRB_LICENSE_FILE:-$HOME/gurobi.lic}"
+# --- environment (NLHPC Leftraru; verified 2026-06-01, backported from
+# node_obbt_round.slurm) — module gurobi ships gurobipy off-path; license is the
+# central floating token server (no GRB_LICENSE_FILE override). -------------
+module load gurobi
+export PYTHONPATH="$GUROBI_HOME/lib/python3.13/site-packages:${PYTHONPATH:-}"
 export PYTHONIOENCODING=utf-8
 export PYTHONUTF8=1
 # Pin Gurobi threads to the cpus we requested (reproducible + polite on shared nodes):
