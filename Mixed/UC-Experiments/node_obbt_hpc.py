@@ -15,13 +15,18 @@ VALIDITY (unchanged from the in-process driver):
   * obbt_iter=1 (the safe default) keeps OBBT valid per box even when the box
     excludes the hint CE (the guard goes inactive — see _obbt_root).
 
-Three subcommands:
+Four subcommands:
     emit      <grid> <n_boxes> <outdir> [--dims D] [--budget S] [--seed-interp K] [--max-iter N]
     solve     <outdir> <box_id>
     aggregate <outdir>
+    drive     <outdir> [--grid G ...]   # unattended campaign: emit -> solve array ->
+                                        # harvest/aggregate -> split-worst -> repeat
+                                        # until the gap certifies (see cmd_drive).
 
 Local end-to-end (no cluster) is just: emit, then a loop of `solve`, then aggregate.
-On NLHPC: emit once, submit `node_obbt.slurm` as an array of size n_boxes, then aggregate.
+On NLHPC: emit once, submit `node_obbt.slurm` as an array of size n_boxes, then aggregate —
+or let `drive` run the whole loop from a login node:
+  CE_ALPHA=0.05 nohup python node_obbt_hpc.py drive runs/nobbt14_a05 > drive14.log 2>&1 &
 
 Usage:
   PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python node_obbt_hpc.py emit 14 8 runs/ieee14 --budget 300
@@ -320,17 +325,304 @@ def cmd_aggregate(args):
     vd, _, _ = g0["oracle"].solve_foil(b_star)
     verified = (vd is not None and vp is not None and vd <= vp + 1e-3)
     feas_lbs = [r["master_LB"] for r in feas]
+    certified = bool(np.isfinite(gap) and gap <= 1e-3)
     print("=" * 64)
     print(f"[aggregate] grid=IEEE{spec['grid']}  boxes={len(results)}/{n_expected}"
           f"  ({n_infeas} infeasible/pruned)")
     print(f"  global_LB (min feasible-box ObjBound) = {global_LB:.6f}")
     print(f"  global_UB (min CE; hint F={hint_F:.4f})  = {global_UB:.6f}"
           f"  [oracle re-verified: {verified}]")
-    print(f"  gap = {100*gap:.2f}%"
-          + ("   ✅ CERTIFIED" if np.isfinite(gap) and gap <= 1e-3 else ""))
+    print(f"  gap = {100*gap:.2f}%" + ("   ✅ CERTIFIED" if certified else ""))
     if feas_lbs:
         print(f"  feasible-box LB range: [{min(feas_lbs):.4f}, {max(feas_lbs):.4f}]")
     print("=" * 64)
+    # Persist the official (oracle-verified) summary so the `drive` orchestrator —
+    # which runs this step inside an srun allocation — can read it back.
+    json.dump(dict(grid=spec["grid"], n_results=len(results), n_expected=n_expected,
+                   n_infeasible=n_infeas, global_LB=global_LB, global_UB=global_UB,
+                   hint_F=hint_F, gap=gap, certified=certified,
+                   oracle_verified=bool(verified),
+                   b_star=[float(x) for x in b_star]),
+              open(os.path.join(args.outdir, "aggregate_summary.json"), "w"), indent=2)
+
+
+# --------------------------------------------------------------------------- #
+# drive — unattended split-worst orchestration of the whole campaign
+#
+# Automates the loop that certified IEEE-14 a05 manually over 12 rounds:
+#   emit (once) -> sbatch --wait the open boxes -> harvest incumbents ->
+#   cheap aggregate -> certified? official oracle aggregate via srun :
+#   else split every box pinning the bound and repeat.
+#
+# The drive process itself only does file bookkeeping and blocking sbatch/srun
+# calls (the run_coordinator_leftraru.sh pattern) — it is safe on a login node.
+# Run it detached:  nohup python node_obbt_hpc.py drive runs/<dir> ... &
+#
+# VALIDITY: identical to the manual recipe. Splitting replaces a parent box by
+# an exhaustive quartering of itself, so the leaf set stays an exhaustive
+# partition of the root b-box; the parent's stale bound is retired
+# (result_NNNN.json -> retired_result_NNNN.json, excluded from every glob) and
+# its oracle-verified incumbent is folded into incumbent.json BEFORE retiring,
+# so no UB information is ever lost.
+# --------------------------------------------------------------------------- #
+
+def _drive_boxes(outdir):
+    """All box ids present as box_NNNN.json."""
+    return sorted(int(os.path.basename(p)[4:8])
+                  for p in glob.glob(os.path.join(outdir, "box_[0-9]*.json")))
+
+
+def _drive_results(outdir):
+    """id -> result dict, live results only (retired parents excluded by glob)."""
+    out = {}
+    for p in glob.glob(os.path.join(outdir, "result_[0-9]*.json")):
+        r = json.load(open(p))
+        out[int(r["box_id"])] = r
+    return out
+
+
+def _drive_retired(outdir):
+    return {int(os.path.basename(p)[len("retired_result_"):len("retired_result_") + 4])
+            for p in glob.glob(os.path.join(outdir, "retired_result_[0-9]*.json"))}
+
+
+def _harvest_incumbent(outdir, results):
+    """Fold every oracle-verified box CE into incumbent.json; return (F, b)."""
+    inc_p = os.path.join(outdir, "incumbent.json")
+    cands = []
+    if os.path.exists(inc_p):
+        inc = json.load(open(inc_p))
+        if inc.get("best_F") is not None and inc.get("best_b") is not None:
+            cands.append((float(inc["best_F"]), inc["best_b"]))
+    for r in results.values():
+        if r.get("best_F") is not None and r.get("best_b") is not None:
+            cands.append((float(r["best_F"]), r["best_b"]))
+    if not cands:
+        return float("inf"), None
+    best_F, best_b = min(cands, key=lambda t: t[0])
+    json.dump(dict(best_F=best_F, best_b=[float(x) for x in best_b]),
+              open(inc_p, "w"), indent=2)
+    return best_F, best_b
+
+
+def _cheap_aggregate(outdir, tol):
+    """Round-decision bookkeeping from the result files alone — NO build_grid, NO
+    Gurobi. UB = min oracle-verified CE seen so far (incumbent + box CEs); LB and
+    the below-bar set come from the live per-box master_LB values. The official
+    certificate still goes through cmd_aggregate's oracle re-verification."""
+    boxes = _drive_boxes(outdir)
+    results = _drive_results(outdir)
+    retired = _drive_retired(outdir)
+    open_ids = [b for b in boxes if b not in results and b not in retired]
+    UB, _ = _harvest_incumbent(outdir, results)
+    feas = {i: r for i, r in results.items()
+            if r.get("feasible") and r.get("master_LB") is not None}
+    LB = min((r["master_LB"] for r in feas.values()), default=float("inf"))
+    bar = UB * (1.0 - tol) if np.isfinite(UB) else float("inf")
+    below_bar = sorted((i for i, r in feas.items() if r["master_LB"] < bar),
+                       key=lambda i: feas[i]["master_LB"])
+    gap = ((UB - LB) / abs(UB)
+           if np.isfinite(UB) and np.isfinite(LB) and UB != 0 else float("nan"))
+    return dict(open_ids=open_ids, n_boxes=len(boxes), n_results=len(results),
+                n_retired=len(retired), UB=UB, LB=LB, gap=gap, below_bar=below_bar)
+
+
+def split_box(outdir, box_id, n_dims=2):
+    """The manual round recipe: quarter box `box_id` along its `n_dims` widest
+    dimensions (absolute width), append the children as new boxes, retire the
+    parent's result. Caller must harvest incumbents first."""
+    import itertools
+    bx = json.load(open(os.path.join(outdir, f"box_{box_id:04d}.json")))
+    lo, hi = bx["lo"], bx["hi"]
+    widths = {k: float(hi[k]) - float(lo[k]) for k in lo}
+    dims = sorted(widths, key=widths.get, reverse=True)[:max(1, min(n_dims, len(widths)))]
+    if widths[dims[0]] <= 1e-9:
+        raise RuntimeError(f"box {box_id} is degenerate (max width "
+                           f"{widths[dims[0]]:.2e}) — cannot split further.")
+    mids = {k: 0.5 * (float(lo[k]) + float(hi[k])) for k in dims}
+    spec_p = os.path.join(outdir, "spec.json")
+    spec = json.load(open(spec_p))
+    child_ids = []
+    nb = spec["n_boxes"]
+    for combo in itertools.product((0, 1), repeat=len(dims)):
+        clo, chi = dict(lo), dict(hi)
+        for k, h in zip(dims, combo):
+            if h == 0:
+                chi[k] = mids[k]
+            else:
+                clo[k] = mids[k]
+        json.dump({"lo": clo, "hi": chi},
+                  open(os.path.join(outdir, f"box_{nb:04d}.json"), "w"))
+        child_ids.append(nb)
+        nb += 1
+    spec["n_boxes"] = nb
+    json.dump(spec, open(spec_p, "w"), indent=1)
+    res_p = os.path.join(outdir, f"result_{box_id:04d}.json")
+    if os.path.exists(res_p):
+        os.replace(res_p, os.path.join(outdir, f"retired_result_{box_id:04d}.json"))
+    print(f"[drive] split box {box_id} along dims {dims} -> children {child_ids}")
+    return child_ids
+
+
+def _hms(seconds):
+    seconds = int(seconds)
+    return f"{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
+
+
+def _round_resources(budget, max_iter, deep=False):
+    """Memory/walltime heuristic measured on the IEEE-14 a05 campaign: boxes
+    solved at deep budgets (>=1800 s master TL) peak well above 12G — 12G OOMs,
+    24G holds. Walltime covers max_iter CCG iterations at full budget + margin."""
+    deep = deep or budget >= 1800
+    if deep:
+        return "24G", "05:00:00"      # the proven IEEE-14 a05 deep-round envelope
+    secs = min(int(1.3 * max_iter * budget) + 900, 5 * 3600)
+    return "12G", _hms(max(secs, 3000))
+
+
+def _run(cmd, dry):
+    """Run a blocking cluster command; in --dry-run print it and stop the drive."""
+    import subprocess
+    print(f"[drive] $ {' '.join(cmd)}", flush=True)
+    if dry:
+        print("[drive] --dry-run: stopping before the cluster command above.")
+        sys.exit(0)
+    return subprocess.run(cmd, check=False).returncode
+
+
+def _export_arg():
+    a = os.environ.get("CE_ALPHA")
+    return "--export=ALL" + (f",CE_ALPHA={a}" if a else "")
+
+
+def _sbatch_solve(outdir, ids, mem, walltime, maxconc, slurm_script, dry):
+    idlist = ",".join(str(i) for i in ids)
+    return _run(["sbatch", "--wait", f"--array={idlist}%{maxconc}",
+                 f"--mem={mem}", f"--time={walltime}", _export_arg(),
+                 slurm_script, outdir], dry)
+
+
+def _drive_log(outdir, entry):
+    import datetime
+    p = os.path.join(outdir, "drive_log.json")
+    log = json.load(open(p)) if os.path.exists(p) else []
+    entry["at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    log.append(entry)
+    json.dump(log, open(p, "w"), indent=1)
+
+
+def cmd_drive(args):
+    import datetime, shutil
+    outdir = args.outdir
+    t0 = __import__("time").time()
+    here = os.path.dirname(os.path.abspath(__file__))
+    slurm_script = os.path.join(here, "node_obbt.slurm")
+
+    # ---- emit (first run only): the adaptive carve is a real solve — submit it
+    # as its own job, never run it on the login node. ------------------------
+    if not os.path.exists(os.path.join(outdir, "spec.json")):
+        if not args.grid:
+            sys.exit("[drive] no spec.json in outdir and no --grid given: pass "
+                     "--grid and --n-boxes for the initial emit.")
+        os.makedirs(outdir, exist_ok=True)
+        emit_sh = os.path.join(outdir, "drive_emit.slurm")
+        with open(emit_sh, "w", newline="\n") as f:
+            f.write(f"""#!/bin/bash
+#SBATCH --job-name=nobbt_emit
+#SBATCH --partition=main
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+#SBATCH --time=02:00:00
+#SBATCH --output={outdir}/emit_%j.out
+#SBATCH --error={outdir}/emit_%j.err
+module load gurobi
+export PYTHONPATH="$GUROBI_HOME/lib/python3.13/site-packages:${{PYTHONPATH:-}}"
+export PYTHONIOENCODING=utf-8 PYTHONUTF8=1
+export GRB_THREADS=$SLURM_CPUS_PER_TASK
+srun python {os.path.join(here, 'node_obbt_hpc.py')} emit {args.grid} {args.n_boxes} \\
+    {outdir} --adaptive --emit-budget {args.emit_budget} --budget {args.budget} \\
+    --seed-interp {args.seed_interp} --max-iter {args.max_iter}
+""")
+        rc = _run(["sbatch", "--wait", _export_arg(), emit_sh], args.dry_run)
+        if rc != 0 or not os.path.exists(os.path.join(outdir, "spec.json")):
+            sys.exit(f"[drive] emit job failed (rc={rc}) or produced no spec.json — "
+                     f"see {outdir}/emit_*.err")
+
+    spec = json.load(open(os.path.join(outdir, "spec.json")))
+    print(f"[drive] campaign {outdir}: grid=IEEE{spec['grid']}  budget={spec['budget']:g}s"
+          f"  max_iter={spec['max_iter']}  tol={args.tol:g}  CE_ALPHA="
+          f"{os.environ.get('CE_ALPHA', '(default 0.10)')}", flush=True)
+
+    rounds = 0
+    while True:
+        agg = _cheap_aggregate(outdir, args.tol)
+        print(f"[drive] round {rounds}: boxes={agg['n_boxes']} ({agg['n_retired']} retired)"
+              f"  open={len(agg['open_ids'])}  LB={agg['LB']:.6f}  UB={agg['UB']:.6f}"
+              f"  gap={100 * agg['gap']:.3f}%  below-bar={agg['below_bar']}", flush=True)
+
+        # 1) open boxes -> solve them (this is a "round").
+        if agg["open_ids"]:
+            if rounds >= args.max_rounds:
+                print(f"[drive] max-rounds={args.max_rounds} reached with boxes still "
+                      f"open — stopping. Resume with the same command.")
+                return
+            rounds += 1
+            mem, wt = _round_resources(spec["budget"], spec["max_iter"])
+            _sbatch_solve(outdir, agg["open_ids"], mem, wt, args.maxconc,
+                          slurm_script, args.dry_run)
+            missing = _cheap_aggregate(outdir, args.tol)["open_ids"]
+            if missing:
+                # OOM/failure recovery: one retry at deep resources.
+                print(f"[drive] {len(missing)} box(es) returned no result "
+                      f"({missing}) — resubmitting once at deep memory.")
+                mem, wt = _round_resources(spec["budget"], spec["max_iter"], deep=True)
+                _sbatch_solve(outdir, missing, mem, wt, args.maxconc,
+                              slurm_script, args.dry_run)
+                missing = _cheap_aggregate(outdir, args.tol)["open_ids"]
+                if missing:
+                    sys.exit(f"[drive] boxes {missing} failed twice — inspect "
+                             f"runs/node_obbt_*_{missing[0]}.err before resuming.")
+            _drive_log(outdir, dict(event="solved", round=rounds,
+                                    ids=agg["open_ids"], mem=mem, time=wt))
+            continue
+
+        # 2) nothing open and the bound clears the bar -> official certificate.
+        if np.isfinite(agg["gap"]) and agg["gap"] <= args.tol:
+            print(f"[drive] cheap gap {100 * agg['gap']:.3f}% <= tol — running the "
+                  f"official oracle-verified aggregate.")
+            _run(["srun", "--partition=main", "--cpus-per-task=4", "--mem=8G",
+                  "-t", "00:25:00", "python",
+                  os.path.join(here, "node_obbt_hpc.py"), "aggregate", outdir],
+                 args.dry_run)
+            summ_p = os.path.join(outdir, "aggregate_summary.json")
+            summ = json.load(open(summ_p)) if os.path.exists(summ_p) else None
+            if summ and summ.get("certified") and summ.get("oracle_verified"):
+                cert = dict(summ, tol=args.tol, rounds=rounds,
+                            wall_s=round(__import__("time").time() - t0, 1),
+                            finished=datetime.datetime.now().isoformat(timespec="seconds"))
+                json.dump(cert, open(os.path.join(outdir, "certificate.json"), "w"),
+                          indent=2)
+                print(f"[drive] ✅ CERTIFIED: F*={summ['global_UB']:.6f}  "
+                      f"LB={summ['global_LB']:.6f}  gap={100 * summ['gap']:.3f}%  "
+                      f"({rounds} rounds, {_hms(__import__('time').time() - t0)}) — "
+                      f"certificate.json written.")
+                _drive_log(outdir, dict(event="certified", round=rounds,
+                                        F=summ["global_UB"], LB=summ["global_LB"]))
+                return
+            sys.exit("[drive] official aggregate did NOT confirm the cheap gap "
+                     "(oracle disagreement or missing summary) — inspect "
+                     "aggregate_summary.json; not writing a certificate.")
+
+        # 3) bound below the bar -> split the pinning box(es) and loop.
+        if not agg["below_bar"]:
+            sys.exit(f"[drive] no open boxes, gap {100 * agg['gap']:.3f}% > tol, but no "
+                     f"feasible box sits below the bar — inconsistent state (all boxes "
+                     f"infeasible with a finite UB?). Inspect {outdir} manually.")
+        to_split = agg["below_bar"][:args.max_splits_per_round]
+        for bid in to_split:
+            split_box(outdir, bid)
+        _drive_log(outdir, dict(event="split", round=rounds, parents=to_split))
 
 
 def main():
@@ -348,6 +640,22 @@ def main():
     s = sub.add_parser("solve"); s.add_argument("outdir"); s.add_argument("box_id", type=int)
     s.set_defaults(func=cmd_solve)
     a = sub.add_parser("aggregate"); a.add_argument("outdir"); a.set_defaults(func=cmd_aggregate)
+    d = sub.add_parser("drive", help="unattended split-worst campaign to certification")
+    d.add_argument("outdir")
+    d.add_argument("--grid", choices=list(_FNAME), help="required for the initial emit "
+                   "(omit to resume an existing outdir)")
+    d.add_argument("--n-boxes", type=int, default=64, help="[emit] adaptive carve target")
+    d.add_argument("--emit-budget", type=float, default=60.0)
+    d.add_argument("--budget", type=float, default=3600.0, help="[emit] per-box master TL (s)")
+    d.add_argument("--seed-interp", type=int, default=0)
+    d.add_argument("--max-iter", type=int, default=3)
+    d.add_argument("--tol", type=float, default=1e-3, help="relative certification gap")
+    d.add_argument("--max-rounds", type=int, default=20, help="max solve submissions")
+    d.add_argument("--maxconc", type=int, default=11, help="array throttle (88-core grant / 8)")
+    d.add_argument("--max-splits-per-round", type=int, default=8)
+    d.add_argument("--dry-run", action="store_true",
+                   help="do all local bookkeeping but stop at the first cluster command")
+    d.set_defaults(func=cmd_drive)
     args = ap.parse_args()
     args.func(args)
 
