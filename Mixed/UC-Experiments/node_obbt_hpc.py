@@ -99,8 +99,11 @@ def build_grid(grid):
     # (max expansion) — NOT a B&S CE — and flag it LOUDLY so a run can never
     # silently skip the B&S phase. hint_source + the B&S scalars are returned so
     # the coordinator can record the hint value and the hint gap.
-    ckpt = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        f"bs_{grid}_checkpoint.json")
+    # CE_BS_CHECKPOINT points at a campaign-local checkpoint (single-run
+    # pipeline: the drive's own B&S phase wrote it into the campaign outdir).
+    # Unset -> legacy shared checkpoint beside this script.
+    ckpt = os.environ.get("CE_BS_CHECKPOINT") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), f"bs_{grid}_checkpoint.json")
     bs_best_F = bs_LB = None
     if os.path.exists(ckpt):
         _bs = json.load(open(ckpt))
@@ -509,9 +512,9 @@ def _round_resources(budget, max_iter, deep=False):
     24G holds. Walltime covers max_iter CCG iterations at full budget + margin."""
     deep = deep or budget >= 1800
     if deep:
-        return "24G", "05:00:00"      # the proven IEEE-14 a05 deep-round envelope
+        return "24G", 5 * 3600        # the proven IEEE-14 a05 deep-round envelope
     secs = min(int(1.3 * max_iter * budget) + 900, 5 * 3600)
-    return "12G", _hms(max(secs, 3000))
+    return "12G", max(secs, 3000)
 
 
 def _run(cmd, dry):
@@ -525,8 +528,12 @@ def _run(cmd, dry):
 
 
 def _export_arg():
-    a = os.environ.get("CE_ALPHA")
-    return "--export=ALL" + (f",CE_ALPHA={a}" if a else "")
+    s = "--export=ALL"
+    for var in ("CE_ALPHA", "CE_BS_CHECKPOINT"):
+        v = os.environ.get(var)
+        if v:
+            s += f",{var}={v}"
+    return s
 
 
 def _sbatch_solve(outdir, ids, mem, walltime, maxconc, slurm_script, dry):
@@ -546,11 +553,77 @@ def _drive_log(outdir, entry):
 
 
 def cmd_drive(args):
-    import datetime, shutil
+    import datetime, time
     outdir = args.outdir
-    t0 = __import__("time").time()
+    t0 = time.time()
     here = os.path.dirname(os.path.abspath(__file__))
     slurm_script = os.path.join(here, "node_obbt.slurm")
+
+    def _remaining():
+        """Seconds left in the wall budget (inf when uncapped)."""
+        return ((args.wall_budget - (time.time() - t0))
+                if args.wall_budget else float("inf"))
+
+    def _finalize_timelimit(agg):
+        """Wall budget exhausted: run the official oracle-verified aggregate and
+        report the state AT THE LIMIT — valid by the partition bound (the LB
+        holds at any stopping point). No certificate unless the gap closed."""
+        print(f"[drive] wall budget {_hms(args.wall_budget)} exhausted "
+              f"(elapsed {_hms(time.time() - t0)}) — finalizing.")
+        _run(["srun", "--partition=main", "--cpus-per-task=4", "--mem=8G",
+              "-t", "00:25:00", "python",
+              os.path.join(here, "node_obbt_hpc.py"), "aggregate", outdir],
+             args.dry_run)
+        summ_p = os.path.join(outdir, "aggregate_summary.json")
+        summ = json.load(open(summ_p)) if os.path.exists(summ_p) else {}
+        rep = dict(summ, wall_budget_s=args.wall_budget,
+                   elapsed_s=round(time.time() - t0, 1), rounds=rounds,
+                   finished=datetime.datetime.now().isoformat(timespec="seconds"))
+        json.dump(rep, open(os.path.join(outdir, "timelimit_report.json"), "w"),
+                  indent=2)
+        lb = summ.get("global_LB"); ub = summ.get("global_UB"); gp_ = summ.get("gap")
+        print(f"[drive] ⏱ TIME LIMIT: LB={lb}  UB={ub}  "
+              f"gap={100 * gp_:.2f}%" if gp_ is not None else
+              "[drive] ⏱ TIME LIMIT: aggregate summary missing")
+        _drive_log(outdir, dict(event="timelimit", round=rounds, LB=lb, UB=ub))
+
+    # ---- B&S warm-start phase (single-run pipeline): run a SMALL, FAST B&S
+    # into the campaign dir and point every later stage at that checkpoint —
+    # no shared bs_<grid>_checkpoint.json involved. ---------------------------
+    ck = os.path.abspath(os.path.join(outdir, "bs_checkpoint.json"))
+    if os.path.exists(ck):
+        # Resuming a single-run campaign: re-attach its own checkpoint even if
+        # --bs-budget was not repeated (never fall back to the shared one).
+        os.environ["CE_BS_CHECKPOINT"] = ck
+    if args.bs_budget > 0:
+        os.environ["CE_BS_CHECKPOINT"] = ck   # inherited via --export=ALL
+        if not os.path.exists(ck):
+            if not args.grid:
+                sys.exit("[drive] --bs-budget needs --grid on the first run.")
+            os.makedirs(outdir, exist_ok=True)
+            bs_sh = os.path.join(outdir, "drive_bs.slurm")
+            bs_wall = _hms(int(args.bs_budget * 1.4) + 600)
+            with open(bs_sh, "w", newline="\n") as f:
+                f.write(f"""#!/bin/bash
+#SBATCH --job-name=nobbt_bs
+#SBATCH --partition=main
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+#SBATCH --time={bs_wall}
+#SBATCH --output={outdir}/bs_%j.out
+#SBATCH --error={outdir}/bs_%j.err
+module load gurobi
+export PYTHONPATH="$GUROBI_HOME/lib/python3.13/site-packages:${{PYTHONPATH:-}}"
+export PYTHONIOENCODING=utf-8 PYTHONUTF8=1
+export GRB_THREADS=$SLURM_CPUS_PER_TASK
+srun python {os.path.join(here, 'run_bs.py')} {args.grid} --fresh \\
+    --out {ck} --time-limit {args.bs_budget} --max-nodes 1000000
+""")
+            rc = _run(["sbatch", "--wait", _export_arg(), bs_sh], args.dry_run)
+            if rc != 0 or not os.path.exists(ck):
+                sys.exit(f"[drive] B&S warm-start job failed (rc={rc}) or wrote no "
+                         f"checkpoint — see {outdir}/bs_*.err")
 
     # ---- emit (first run only): the adaptive carve is a real solve — submit it
     # as its own job, never run it on the login node. ------------------------
@@ -598,20 +671,29 @@ srun python {os.path.join(here, 'node_obbt_hpc.py')} emit {args.grid} {args.n_bo
 
         # 1) open boxes -> solve them (this is a "round").
         if agg["open_ids"]:
+            if _remaining() < 600:
+                _finalize_timelimit(agg)
+                return
             if rounds >= args.max_rounds:
                 print(f"[drive] max-rounds={args.max_rounds} reached with boxes still "
                       f"open — stopping. Resume with the same command.")
                 return
             rounds += 1
-            mem, wt = _round_resources(spec["budget"], spec["max_iter"])
+            mem, wt_s = _round_resources(spec["budget"], spec["max_iter"])
+            if args.wall_budget:
+                wt_s = min(wt_s, max(600, int(_remaining())))
+            wt = _hms(wt_s)
             _sbatch_solve(outdir, agg["open_ids"], mem, wt, args.maxconc,
                           slurm_script, args.dry_run)
             missing = _cheap_aggregate(outdir, args.tol)["open_ids"]
-            if missing:
+            if missing and _remaining() >= 600:
                 # OOM/failure recovery: one retry at deep resources.
                 print(f"[drive] {len(missing)} box(es) returned no result "
                       f"({missing}) — resubmitting once at deep memory.")
-                mem, wt = _round_resources(spec["budget"], spec["max_iter"], deep=True)
+                mem, wt_s = _round_resources(spec["budget"], spec["max_iter"], deep=True)
+                if args.wall_budget:
+                    wt_s = min(wt_s, max(600, int(_remaining())))
+                wt = _hms(wt_s)
                 _sbatch_solve(outdir, missing, mem, wt, args.maxconc,
                               slurm_script, args.dry_run)
                 missing = _cheap_aggregate(outdir, args.tol)["open_ids"]
@@ -635,13 +717,13 @@ srun python {os.path.join(here, 'node_obbt_hpc.py')} emit {args.grid} {args.n_bo
             summ = json.load(open(summ_p)) if os.path.exists(summ_p) else None
             if summ and summ.get("certified") and summ.get("oracle_verified"):
                 cert = dict(summ, tol=args.tol, rounds=rounds,
-                            wall_s=round(__import__("time").time() - t0, 1),
+                            wall_s=round(time.time() - t0, 1),
                             finished=datetime.datetime.now().isoformat(timespec="seconds"))
                 json.dump(cert, open(os.path.join(outdir, "certificate.json"), "w"),
                           indent=2)
                 print(f"[drive] ✅ CERTIFIED: F*={summ['global_UB']:.6f}  "
                       f"LB={summ['global_LB']:.6f}  gap={100 * summ['gap']:.3f}%  "
-                      f"({rounds} rounds, {_hms(__import__('time').time() - t0)}) — "
+                      f"({rounds} rounds, {_hms(time.time() - t0)}) — "
                       f"certificate.json written.")
                 _drive_log(outdir, dict(event="certified", round=rounds,
                                         F=summ["global_UB"], LB=summ["global_LB"]))
@@ -661,6 +743,9 @@ srun python {os.path.join(here, 'node_obbt_hpc.py')} emit {args.grid} {args.n_bo
             continue
 
         # 3) bound below the bar -> split the pinning box(es) and loop.
+        if _remaining() < 600:
+            _finalize_timelimit(agg)
+            return
         if not agg["below_bar"]:
             sys.exit(f"[drive] no open boxes, gap {100 * agg['gap']:.3f}% > tol, but no "
                      f"feasible box sits below the bar — inconsistent state (all boxes "
@@ -700,6 +785,14 @@ def main():
     d.add_argument("--max-rounds", type=int, default=20, help="max solve submissions")
     d.add_argument("--maxconc", type=int, default=11, help="array throttle (88-core grant / 8)")
     d.add_argument("--max-splits-per-round", type=int, default=8)
+    d.add_argument("--bs-budget", type=float, default=0.0,
+                   help="run a FAST B&S warm-start phase of this many seconds into "
+                        "the campaign dir (single-run pipeline; 0 = use the shared "
+                        "legacy checkpoint)")
+    d.add_argument("--wall-budget", type=float, default=0.0,
+                   help="total campaign wall budget in seconds (e.g. 7200 for the "
+                        "2h comparison); at the limit the state is aggregated and "
+                        "reported honestly (0 = run to certification)")
     d.add_argument("--dry-run", action="store_true",
                    help="do all local bookkeeping but stop at the first cluster command")
     d.set_defaults(func=cmd_drive)
