@@ -313,17 +313,51 @@ def cmd_aggregate(args):
         _inc = json.load(open(_inc_p))
         if _inc.get("best_F") is not None and _inc.get("best_b") is not None:
             ce.append(dict(best_F=float(_inc["best_F"]), best_b=_inc["best_b"]))
-    box_UB = min((r["best_F"] for r in ce), default=float("inf"))
-    global_UB = min(hint_F, box_UB)
-    best = min(ce, key=lambda r: r["best_F"]) if ce else None
-    gap = (global_UB - global_LB) / abs(global_UB) if np.isfinite(global_UB) and global_UB != 0 else float("nan")
-    # Re-verify the incumbent behind global_UB with the oracle (defence-in-depth):
-    # the best box CE if one beats the hint, else the hint b_hat itself.
-    b_star = (np.array(best["best_b"], float) if (best is not None and box_UB <= hint_F
-              and best["best_b"] is not None) else np.array(bh, float))
-    vp, _, _ = g0["oracle"].solve_plain(b_star)
-    vd, _, _ = g0["oracle"].solve_foil(b_star)
-    verified = (vd is not None and vp is not None and vd <= vp + 1e-3)
+    # Oracle re-verification (defence-in-depth): walk the UB candidates in
+    # ascending F and report the FIRST one the exact oracle confirms. A
+    # candidate that fails (e.g. a hint registered on trust that sits a hair
+    # outside the razor-thin CE boundary — seen on IEEE-14 a05, line 15 at
+    # 46.79998 vs 46.8) is DISCARDED loudly: it must never certify, and it
+    # must not silently sink the reported UB either.
+    cands = sorted((r for r in ce if r.get("best_b") is not None),
+                   key=lambda r: r["best_F"])[:10]
+    cands.append(dict(best_F=hint_F, best_b=[float(x) for x in bh]))  # B&S hint floors the list
+    b_star = None
+    global_UB = float("inf")
+    ub_discarded = []
+    for r in cands:
+        bb = np.array(r["best_b"], float)
+        vp, _, _ = g0["oracle"].solve_plain(bb)
+        vd, _, _ = g0["oracle"].solve_foil(bb)
+        if vd is not None and vp is not None and vd <= vp + 1e-3:
+            b_star = bb
+            global_UB = float(r["best_F"])
+            break
+        ub_discarded.append(float(r["best_F"]))
+        print(f"[aggregate] *** UB candidate F={r['best_F']:.6f} FAILED oracle "
+              f"re-verification (v_foil > v_plain at that b) — discarded. ***")
+    verified = b_star is not None
+    if ub_discarded:
+        # Purge the rejected CE claims from their result files so the cheap
+        # harvest cannot resurrect them (each master_LB stays — it is valid).
+        for p in glob.glob(os.path.join(args.outdir, "result_[0-9]*.json")):
+            rr = json.load(open(p))
+            if rr.get("best_F") in ub_discarded:
+                rr["ub_rejected"] = rr["best_F"]
+                rr["best_F"] = None
+                rr["best_b"] = None
+                json.dump(rr, open(p, "w"), indent=2)
+    if b_star is None:
+        b_star = np.array(bh, float)          # report the hint point, unverified
+    elif ub_discarded:
+        # The honest UB now lives in incumbent.json so the drive loop and any
+        # later cheap aggregate work from a verified incumbent only.
+        json.dump(dict(best_F=global_UB, best_b=[float(x) for x in b_star]),
+                  open(_inc_p, "w"), indent=2)
+        print(f"[aggregate] incumbent.json rewritten to the verified UB "
+              f"F={global_UB:.6f}.")
+    gap = ((global_UB - global_LB) / abs(global_UB)
+           if np.isfinite(global_UB) and global_UB != 0 else float("nan"))
     feas_lbs = [r["master_LB"] for r in feas]
     certified = bool(np.isfinite(gap) and gap <= 1e-3)
     print("=" * 64)
@@ -341,7 +375,7 @@ def cmd_aggregate(args):
     json.dump(dict(grid=spec["grid"], n_results=len(results), n_expected=n_expected,
                    n_infeasible=n_infeas, global_LB=global_LB, global_UB=global_UB,
                    hint_F=hint_F, gap=gap, certified=certified,
-                   oracle_verified=bool(verified),
+                   oracle_verified=bool(verified), ub_discarded=ub_discarded,
                    b_star=[float(x) for x in b_star]),
               open(os.path.join(args.outdir, "aggregate_summary.json"), "w"), indent=2)
 
@@ -555,6 +589,7 @@ srun python {os.path.join(here, 'node_obbt_hpc.py')} emit {args.grid} {args.n_bo
           f"{os.environ.get('CE_ALPHA', '(default 0.10)')}", flush=True)
 
     rounds = 0
+    nonconfirm = 0
     while True:
         agg = _cheap_aggregate(outdir, args.tol)
         print(f"[drive] round {rounds}: boxes={agg['n_boxes']} ({agg['n_retired']} retired)"
@@ -585,6 +620,7 @@ srun python {os.path.join(here, 'node_obbt_hpc.py')} emit {args.grid} {args.n_bo
                              f"runs/node_obbt_*_{missing[0]}.err before resuming.")
             _drive_log(outdir, dict(event="solved", round=rounds,
                                     ids=agg["open_ids"], mem=mem, time=wt))
+            nonconfirm = 0
             continue
 
         # 2) nothing open and the bound clears the bar -> official certificate.
@@ -610,9 +646,19 @@ srun python {os.path.join(here, 'node_obbt_hpc.py')} emit {args.grid} {args.n_bo
                 _drive_log(outdir, dict(event="certified", round=rounds,
                                         F=summ["global_UB"], LB=summ["global_LB"]))
                 return
-            sys.exit("[drive] official aggregate did NOT confirm the cheap gap "
-                     "(oracle disagreement or missing summary) — inspect "
-                     "aggregate_summary.json; not writing a certificate.")
+            # The aggregate discarded unverifiable UB candidate(s) and rewrote
+            # incumbent.json to the best ORACLE-VERIFIED one — re-enter the loop
+            # so pruning/splitting continue against the honest bar. Two
+            # consecutive non-confirmations without progress = a real problem.
+            nonconfirm += 1
+            if nonconfirm >= 2:
+                sys.exit("[drive] official aggregate failed to confirm twice in a "
+                         "row — inspect aggregate_summary.json (ub_discarded) and "
+                         f"{outdir}/incumbent.json; not writing a certificate.")
+            print("[drive] official aggregate did not confirm (unverifiable UB "
+                  "candidate discarded); continuing against the verified "
+                  "incumbent.")
+            continue
 
         # 3) bound below the bar -> split the pinning box(es) and loop.
         if not agg["below_bar"]:
@@ -623,6 +669,7 @@ srun python {os.path.join(here, 'node_obbt_hpc.py')} emit {args.grid} {args.n_bo
         for bid in to_split:
             split_box(outdir, bid)
         _drive_log(outdir, dict(event="split", round=rounds, parents=to_split))
+        nonconfirm = 0
 
 
 def main():
