@@ -133,17 +133,30 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# --- UC-Experiments runtime / solver artifacts (regenerated each run; do not track) ---
+# --- uc_experiments runtime / solver artifacts (regenerated each run; do not track) ---
 #   NOTE: bs_*_checkpoint.json (B&S warm-start hints), pipeline_results/, and
 #   benchmark_results/results.{csv,json} are deliberately committed and NOT ignored.
 _cache_*.pkl
 decomp_*checkpoint*.json
-Mixed/UC-Experiments/runs/
-Mixed/UC-Experiments/benchmark_smoke*/
-Mixed/UC-Experiments/benchmark_results/coord_*/
+uc_experiments/runs/
+uc_experiments/benchmark_smoke*/
+uc_experiments/benchmark_results/coord_*/
+
+# alpha=0.05 experiment campaigns (large result dumps; regenerated on Leftraru)
+uc_experiments/matrix_a05/
+uc_experiments/pipeline_a05/
+uc_experiments/pipeline_*_a05_*/
+uc_experiments/*_a05_campaign/
+uc_experiments/*_a05_drive/
 
 # Local Claude Code config (permission allowlist, local paths — personal, not shared)
 .claude/
 
 # NCXplain timing/figure scratch
-Mixed/UC-Experiments/ncx_results/
+uc_experiments/ncx_results/
+
+# WCEP-on-Leftraru (Felipe): SLURM logs & compiled artifacts are regenerated, not shared
+notebooks/wcep_leftraru/results/
+notebooks/wcep_leftraru/__pycache__/
+notebooks/wcep_leftraru/*.out
+notebooks/wcep_leftraru/*.err

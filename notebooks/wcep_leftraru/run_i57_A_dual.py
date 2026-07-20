@@ -1,0 +1,1036 @@
+# -*- coding: utf-8 -*-
+# ============================================================
+# PRELUDE batch Leftraru (NLHPC) - agregado automaticamente.
+# No modifica el problema: shim de display() fuera de IPython
+# y medicion uniforme de tiempos ([TIMING]).
+# Threads de Gurobi se limitan via gurobi.env en el cwd.
+# ============================================================
+import atexit as _atexit
+import time as _time
+
+_JOB_T0 = _time.perf_counter()
+
+try:
+    from IPython.display import display  # noqa: F401
+except Exception:
+    def display(*args, **kwargs):
+        for _a in args:
+            print(_a)
+
+def _print_total_time():
+    print("\n[TIMING] total_script_seconds={:.2f}".format(
+        _time.perf_counter() - _JOB_T0), flush=True)
+_atexit.register(_print_total_time)
+
+try:
+    import gurobipy as _gp
+    _orig_optimize = _gp.Model.optimize
+
+    def _timed_optimize(self, *args, **kwargs):
+        _t0 = _time.perf_counter()
+        _res = _orig_optimize(self, *args, **kwargs)
+        _wall = _time.perf_counter() - _t0
+        try:
+            _rt = float(self.Runtime)
+            _name = self.ModelName
+        except Exception:
+            _rt, _name = float("nan"), "?"
+        print("[TIMING] optimize '{}': wall={:.2f}s gurobi_runtime={:.2f}s".format(
+            _name, _wall, _rt), flush=True)
+        return _res
+
+    _gp.Model.optimize = _timed_optimize
+    print("[TIMING] gp.Model.optimize instrumentado (wall + Runtime por solve)")
+except Exception as _e:
+    print("[TIMING] aviso: no se pudo instrumentar optimize(): {!r}".format(_e))
+# ============================== fin prelude =================
+
+
+
+# %% ================== celda 90 del notebook ==================
+import os
+import pandas as pd
+import numpy as np
+
+# ============================================================
+# 0) CONFIG: usar CSV IEEE57 finales
+# ============================================================
+PATH = "."
+
+PATH_GEN   = os.path.join(PATH, "generadores_procesados_ieee57_final.csv")
+PATH_LINE  = os.path.join(PATH, "lineas_procesadas_ieee57.csv")
+PATH_LOAD  = os.path.join(PATH, "demanda_nodal_ieee57_final.csv")
+PATH_SOLAR = os.path.join(PATH, "perfil_solar_ieee57_final.csv")
+
+df_gen   = pd.read_csv(PATH_GEN)
+df_lines = pd.read_csv(PATH_LINE)
+df_load  = pd.read_csv(PATH_LOAD)
+
+df_wind = pd.DataFrame(columns=["Gen_ID", "Period", "P_Available_MW"])
+df_solar = pd.read_csv(PATH_SOLAR) if os.path.exists(PATH_SOLAR) else pd.DataFrame(
+    columns=["Gen_ID", "Period", "P_Available_MW"]
+)
+
+# ============================================================
+# 1) LIMPIAR NOMBRES DE COLUMNAS
+# ============================================================
+df_gen.columns   = df_gen.columns.str.strip()
+df_lines.columns = df_lines.columns.str.strip()
+df_load.columns  = df_load.columns.str.strip()
+df_solar.columns = df_solar.columns.str.strip()
+
+# ============================================================
+# 2) RENOMBRAR COLUMNAS PARA DEJARLAS COMPATIBLES
+# ============================================================
+
+# ----- DEMANDA -----
+df_load = df_load.rename(columns={
+    "bus": "Bus ID",
+    "periodo": "Period",
+    "demanda_mw": "Nodal_Load_MW"
+})
+
+# ----- LINEAS -----
+df_lines = df_lines.rename(columns={
+    "desde": "from_bus",
+    "hacia": "to_bus",
+    "x": "Reactancia_X",
+    "fmax": "F_max"
+})
+
+# ----- PERFIL SOLAR -----
+df_solar = df_solar.rename(columns={
+    "id_gen": "Gen_ID",
+    "periodo": "Period",
+    "disponibilidad_mw": "P_Available_MW"
+})
+
+# ============================================================
+# 3) CHEQUEO DE COLUMNAS OBLIGATORIAS
+# ============================================================
+cols_gen_req = [
+    "id_gen", "bus_id", "Pmax", "Pmin", "Costo_Var", "Inercia_H",
+    "Emisiones_tCO2_MWh", "Es_IBR", "Gamma", "Kappa", "Costo_Inv"
+]
+cols_line_req = ["from_bus", "to_bus", "Reactancia_X", "F_max"]
+cols_load_req = ["Bus ID", "Period", "Nodal_Load_MW"]
+
+for c in cols_gen_req:
+    if c not in df_gen.columns:
+        raise ValueError(f"Falta columna en generadores: {c}")
+
+for c in cols_line_req:
+    if c not in df_lines.columns:
+        raise ValueError(f"Falta columna en líneas: {c}")
+
+for c in cols_load_req:
+    if c not in df_load.columns:
+        raise ValueError(f"Falta columna en demanda: {c}")
+
+# ============================================================
+# 4) SANITIZAR TIPOS
+# ============================================================
+df_gen["id_gen"] = df_gen["id_gen"].astype(str)
+df_gen["bus_id"] = df_gen["bus_id"].astype(int)
+
+df_load["Bus ID"] = df_load["Bus ID"].astype(int)
+df_load["Period"] = df_load["Period"].astype(int)
+df_load["Nodal_Load_MW"] = df_load["Nodal_Load_MW"].astype(float)
+
+df_lines["from_bus"] = df_lines["from_bus"].astype(int)
+df_lines["to_bus"]   = df_lines["to_bus"].astype(int)
+df_lines["F_max"] = df_lines["F_max"].astype(float)
+df_lines["Reactancia_X"] = df_lines["Reactancia_X"].astype(float)
+
+if not df_solar.empty:
+    df_solar["Gen_ID"] = df_solar["Gen_ID"].astype(str)
+    df_solar["Period"] = df_solar["Period"].astype(int)
+    df_solar["P_Available_MW"] = df_solar["P_Available_MW"].astype(float)
+
+# ============================================================
+# 5) DEFINICIÓN DE SETS
+# ============================================================
+Y = [1, 2, 3]
+year_growth = {1: 1.00, 2: 1.05, 3: 1.10}
+
+B = sorted(df_load["Bus ID"].unique().tolist())
+T = sorted(df_load["Period"].unique().tolist())
+
+G  = df_gen["id_gen"].tolist()
+GS = df_gen[df_gen["Es_IBR"] == 0]["id_gen"].tolist()
+M  = df_gen[df_gen["Es_IBR"] == 1]["id_gen"].tolist()
+GE = df_gen[df_gen["Emisiones_tCO2_MWh"] > 0]["id_gen"].tolist()
+
+print(f"Sets definidos: |B|={len(B)}, |T|={len(T)}, |G|={len(G)} (|GS|={len(GS)}, |M|={len(M)}, |GE|={len(GE)})")
+
+# ============================================================
+# 6) PARÁMETROS DE GENERADORES
+# ============================================================
+Pmax = df_gen.set_index("id_gen")["Pmax"].to_dict()
+Pmin = df_gen.set_index("id_gen")["Pmin"].to_dict()
+cg   = df_gen.set_index("id_gen")["Costo_Var"].to_dict()
+eg   = df_gen.set_index("id_gen")["Emisiones_tCO2_MWh"].to_dict()
+cinv = df_gen.set_index("id_gen")["Costo_Inv"].to_dict()
+
+Hg = {g: float(df_gen.set_index("id_gen")["Inercia_H"].to_dict().get(g, 0.0)) for g in GS}
+
+g_bus = df_gen.set_index("id_gen")["bus_id"].to_dict()
+
+G_en_bus = {i: [] for i in B}
+for g in G:
+    bi = int(g_bus[g])
+    if bi in G_en_bus:
+        G_en_bus[bi].append(g)
+
+# ============================================================
+# 7) PARÁMETROS IBR
+# ============================================================
+gamma_base = df_gen.set_index("id_gen")["Gamma"].to_dict()
+kappa_base = df_gen.set_index("id_gen")["Kappa"].to_dict()
+
+gamma_max = df_gen.set_index("id_gen")["Gamma_max"].to_dict() if "Gamma_max" in df_gen.columns else {m: 0.5 for m in M}
+kappa_max = df_gen.set_index("id_gen")["Kappa_max"].to_dict() if "Kappa_max" in df_gen.columns else {m: 0.5 for m in M}
+
+xbar_mult = 2.0
+xbar = {m: float(Pmax[m]) * xbar_mult for m in M}
+
+# ============================================================
+# 8) RED
+# ============================================================
+L_id = []
+from_bus_line = {}
+to_bus_line = {}
+F0 = {}
+Bline = {}
+
+for idx, row in df_lines.iterrows():
+    ell = int(idx + 1)   # o usar row["linea"] si existe
+    i = int(row["from_bus"])
+    j = int(row["to_bus"])
+
+    L_id.append(ell)
+    from_bus_line[ell] = i
+    to_bus_line[ell] = j
+    F0[ell] = float(row["F_max"])
+
+    x_val = float(row["Reactancia_X"])
+    if abs(x_val) < 1e-6:
+        x_val = 1e-4
+    Bline[ell] = 1.0 / x_val
+
+lineas_entran = {i: [] for i in B}
+lineas_salen  = {i: [] for i in B}
+
+for ell in L_id:
+    i = from_bus_line[ell]
+    j = to_bus_line[ell]
+
+    if i in lineas_salen:
+        lineas_salen[i].append(ell)
+    if j in lineas_entran:
+        lineas_entran[j].append(ell)
+
+print(f"Red: |L|={len(L_id)}")
+
+# ============================================================
+# 9) DEMANDA
+# ============================================================
+raw_demand = df_load.set_index(["Bus ID", "Period"])["Nodal_Load_MW"].to_dict()
+
+d = {}
+for y in Y:
+    factor = year_growth[y]
+    for i in B:
+        for t in T:
+            d[(i, t, y)] = float(raw_demand.get((i, t), 0.0)) * factor
+
+# ============================================================
+# 10) PERFIL RENOVABLE
+# ============================================================
+P_disp = {(g, t): float(Pmax[g]) for g in G for t in T}
+
+if not df_solar.empty:
+    for _, row in df_solar.iterrows():
+        g_id = str(row["Gen_ID"])
+        t = int(row["Period"])
+        val = float(row["P_Available_MW"])
+        if (g_id in G) and (t in T):
+            P_disp[(g_id, t)] = val
+
+# ============================================================
+# 11) ESCALARES
+# ============================================================
+VOLL = 5000.0
+y_star = 3
+epsilon_CO2 = 0
+
+# ============================================================
+# 12) Hreq y Rreq
+# ============================================================
+D_peak = {y: max(sum(d[(i, t, y)] for i in B) for t in T) for y in Y}
+
+max_hsyn = sum(float(gamma_base.get(m, 0.0)) * float(xbar[m]) for m in M) if len(M) > 0 else 0.0
+max_sync = sum(float(Hg.get(g, 0.0)) for g in GS) if len(GS) > 0 else 0.0
+cap_total = max_hsyn + max_sync
+
+alpha_H = 0.35
+H_floor = 0.05
+
+k_H = (alpha_H * cap_total / D_peak[1]) if D_peak[1] > 1e-9 else 0.0
+Hreq = {}
+for y in Y:
+    base = k_H * D_peak[y]
+    floor = H_floor * cap_total
+    Hreq[y] = max(base, floor)
+
+MaxR = sum(float(kappa_base.get(m, 0.0)) * float(xbar[m]) for m in M) if len(M) > 0 else 0.0
+beta_R = 0.40
+R_floor = 0.05
+
+Rreq = {}
+for y in Y:
+    base = beta_R * MaxR
+    floor = R_floor * MaxR
+    Rreq[y] = max(base, floor)
+
+print("cap_total =", round(cap_total, 4), " MaxR =", round(MaxR, 4))
+print("D_peak =", {y: round(D_peak[y], 2) for y in Y})
+print("Hreq =", {y: round(Hreq[y], 4) for y in Y})
+print("Rreq =", {y: round(Rreq[y], 4) for y in Y})
+
+
+# %% ================== celda 95 del notebook ==================
+import gurobipy as gp
+from gurobipy import GRB
+import numpy as np
+import pandas as pd
+import time
+
+# ============================================================
+# FINAL IEEE57: WCEP CON DUALIDAD FUERTE
+# CASO: SOLO Pmax SÍNCRONO MUTABLE
+#
+#   - Sin PADM.
+#   - Solo se modifica A mediante Pmax_sync_ce[g] para g in GS.
+#   - Hreq queda fijo en b, usando Hreq_fw si existe desde el FW.
+#   - xbar queda fijo.
+#   - Se usa d_fw si existe; si no, se reconstruye con escala por capacidad.
+# ============================================================
+
+t0_total_script = time.time()
+
+# ============================================================
+# 0) OPCIONES
+# ============================================================
+
+# Restricción D del IEEE57
+epsilon_CO2_wcep = 766
+
+# Objetivo J
+alpha_Psync = 1.0
+
+# Si quieres objetivo porcentual, cambia esto a True
+USE_PERCENT_OBJECTIVE = False
+
+# Opciones WCEP
+WCEP_MIPGAP = 5e-3
+WCEP_OUTPUT = 1
+WCEP_TIME_LIMIT = 5 * 60 * 60  # 5 horas
+
+# Pmax_sync_ce solo puede reducirse hasta -15%; no se inventa capacidad.
+P_SYNC_LB_FACTOR = 0.85
+P_SYNC_UB_FACTOR = 1.00
+
+# ============================================================
+# 1) PREPARACIÓN GENERAL IEEE57
+# ============================================================
+
+L_arcs = list(L_id)
+G_IBR = list(M)
+
+if isinstance(B, (int, float, np.floating)):
+    print("⚠️ B estaba pisado como número. Lo reconstruyo desde df_load/df_lines.")
+
+    if "df_load" in globals():
+        B = sorted(df_load["Bus ID"].astype(int).unique().tolist())
+    else:
+        B = sorted(
+            set(df_lines["from_bus"].astype(int))
+            .union(set(df_lines["to_bus"].astype(int)))
+        )
+
+    print("✅ Nuevo B =", B[:10], "... |B| =", len(B))
+
+lineas_entran = {bus: [] for bus in B}
+lineas_salen  = {bus: [] for bus in B}
+
+for ell in L_arcs:
+    i = from_bus_line[ell]
+    j = to_bus_line[ell]
+
+    if j in lineas_entran:
+        lineas_entran[j].append(ell)
+
+    if i in lineas_salen:
+        lineas_salen[i].append(ell)
+
+bus_slack = int(sorted(B)[0])
+
+# ============================================================
+# REFERENCIAS WELL-POSED DEL FW
+# ============================================================
+# Este bloque hace que el PADM-W + WCEP sea consistente con el FW
+# well-posed. Si el FW anterior ya creó Hreq_fw, se usa directamente.
+# Si no existe, se reconstruye con el criterio usado en el FW:
+#   HREQ_ALPHA_WELLPOSED / HREQ_ALPHA_ORIGINAL = 0.28 / 0.35.
+#
+# Importante:
+#   - NO se usa zH.
+#   - Hreq_ce sigue estando en el RHS/b.
+#   - Hreq_base ahora corresponde al Hreq well-posed, no al Hreq original.
+# ============================================================
+
+if "Hreq_fw" in globals():
+    Hreq_ref = {y: float(Hreq_fw[y]) for y in Y}
+    HREQ_REFERENCE_LABEL = "Hreq_fw existente del FW well-posed"
+else:
+    HREQ_ALPHA_ORIGINAL = 0.35
+    HREQ_ALPHA_WELLPOSED = 0.28
+    HREQ_SCALE_FACTOR = HREQ_ALPHA_WELLPOSED / HREQ_ALPHA_ORIGINAL
+    Hreq_ref = {y: HREQ_SCALE_FACTOR * float(Hreq[y]) for y in Y}
+    Hreq_fw = Hreq_ref.copy()
+    HREQ_REFERENCE_LABEL = (
+        f"Hreq_fw reconstruido automáticamente: "
+        f"{HREQ_ALPHA_WELLPOSED}/{HREQ_ALPHA_ORIGINAL} = {HREQ_SCALE_FACTOR:.6f}"
+    )
+
+# ============================================================
+# DEMANDA CORREGIDA DEL FW IEEE57
+# ============================================================
+# Si existe d_fw desde el FW corregido, se usa. Si no existe, se
+# reconstruye con el mismo criterio usado en el FW:
+#   demand_scale_factor = min(1, 0.98 * sum(Pmax) / demanda_pico_original)
+
+DEMAND_SCALE_MODE = globals().get("DEMAND_SCALE_MODE", "auto_capacity")
+DEMAND_SCALE_MANUAL = float(globals().get("DEMAND_SCALE_MANUAL", 1.0))
+DEMAND_CAP_MARGIN = float(globals().get("DEMAND_CAP_MARGIN", 0.98))
+
+if "d_fw" not in globals():
+    print("⚠️ No existe d_fw desde el FW corregido. Lo reconstruyo automáticamente.")
+
+    d_original = {k: float(v) for k, v in d.items()}
+
+    demanda_original_ty = {}
+    for t in T:
+        for y in Y:
+            demanda_original_ty[(t, y)] = sum(
+                d_original[(i, t, y)]
+                for i in B
+                if (i, t, y) in d_original
+            )
+
+    peak_dem_original = max(demanda_original_ty.values())
+    cap_total_pmax = sum(float(Pmax[g]) for g in G)
+
+    if DEMAND_SCALE_MODE == "none":
+        demand_scale_factor = 1.0
+    elif DEMAND_SCALE_MODE == "manual":
+        demand_scale_factor = float(DEMAND_SCALE_MANUAL)
+    elif DEMAND_SCALE_MODE == "auto_capacity":
+        if peak_dem_original <= 1e-9:
+            demand_scale_factor = 1.0
+        else:
+            demand_scale_factor = min(
+                1.0,
+                DEMAND_CAP_MARGIN * cap_total_pmax / peak_dem_original
+            )
+    else:
+        raise ValueError("DEMAND_SCALE_MODE debe ser 'auto_capacity', 'manual' o 'none'.")
+
+    d_fw = {}
+    for i in B:
+        for t in T:
+            for y in Y:
+                if (i, t, y) not in d_original:
+                    raise KeyError(f"Falta d[{i},{t},{y}] en el diccionario original.")
+                d_fw[(i, t, y)] = demand_scale_factor * d_original[(i, t, y)]
+
+    print(f"Factor demanda reconstruido = {demand_scale_factor:.8f}")
+else:
+    print("✅ Usando d_fw existente desde el FW corregido.")
+
+d_ref = d_fw
+DEMAND_REFERENCE_LABEL = "d_fw"
+
+Hreq_base = {y: float(Hreq_ref[y]) for y in Y}
+Pmax_sync_base = {g: float(Pmax[g]) for g in GS}
+
+print("\n" + "="*70)
+print("REFERENCIAS USADAS POR WCEP IEEE57")
+print("="*70)
+print("Referencia demanda:", DEMAND_REFERENCE_LABEL)
+print("Referencia Hreq   :", HREQ_REFERENCE_LABEL)
+print("Cotas Pmax_sync_ce: [0.85, 1.00] alrededor de Pmax_base")
+print("Hreq queda fijo en Hreq_base/well-posed")
+for y in Y:
+    print(f"Año {y}: Hreq original = {float(Hreq[y]):.6f} | Hreq_base/well-posed = {float(Hreq_base[y]):.6f}")
+
+gamma_pos = [float(gamma_base[m]) for m in M if float(gamma_base[m]) > 1e-9]
+
+if len(gamma_pos) == 0:
+    UB_H = 1e8
+else:
+    UB_H = 2.0 * max(float(cinv[m]) for m in M) / min(gamma_pos)
+
+UB_sync = 2.0 * max(max(float(cg[g]) for g in G), float(VOLL))
+
+print("\n" + "="*70)
+print("COTAS DUALES IEEE57")
+print("="*70)
+print(f"UB_H    = {UB_H:.6f}")
+print(f"UB_sync = {UB_sync:.6f}")
+print(f"Bus slack usado: {bus_slack}")
+
+
+print("\n" + "="*70)
+print("CONSTRUYENDO WCEP FINAL IEEE57 CON DUALIDAD FUERTE")
+print("="*70)
+
+w = gp.Model("WCEP_IEEE57_DF_SOLO_Pmax_sync")
+w.Params.NonConvex = 2
+w.Params.MIPGap = WCEP_MIPGAP
+w.Params.OutputFlag = WCEP_OUTPUT
+w.Params.TimeLimit = WCEP_TIME_LIMIT
+
+# ------------------------------------------------------------
+# Variables primales lower-level
+# ------------------------------------------------------------
+
+p = w.addVars(G, T, Y, lb=0.0, name="p")
+u = w.addVars(GS, T, Y, lb=0.0, ub=1.0, name="u")
+s = w.addVars(B, T, Y, lb=0.0, name="s")
+
+xcap = w.addVars(M, Y, lb=0.0, name="xcap")
+h_syn = w.addVars(M, T, Y, lb=0.0, name="h_syn")
+r_ffr = w.addVars(M, T, Y, lb=0.0, name="r_ffr")
+
+f_pos = w.addVars(L_arcs, T, Y, lb=0.0, name="f_pos")
+f_neg = w.addVars(L_arcs, T, Y, lb=0.0, name="f_neg")
+
+theta_p = w.addVars(B, T, Y, lb=0.0, name="theta_p")
+theta_m = w.addVars(B, T, Y, lb=0.0, name="theta_m")
+
+# ------------------------------------------------------------
+# Variables mutables upper-level
+# ------------------------------------------------------------
+
+Pmax_sync_ce = w.addVars(GS, lb=0.0, name="Pmax_sync_ce")
+
+for g in GS:
+    base = Pmax_sync_base[g]
+    w.addConstr(Pmax_sync_ce[g] >= P_SYNC_LB_FACTOR * base, name=f"adm_lb_Psync[{g}]")
+    w.addConstr(Pmax_sync_ce[g] <= P_SYNC_UB_FACTOR * base, name=f"adm_ub_Psync[{g}]")
+
+
+# ------------------------------------------------------------
+# Factibilidad primal Ax >= b
+# ------------------------------------------------------------
+
+R_primal = {}
+RHS_expr = {}
+
+for i in B:
+    for t in T:
+        for y in Y:
+            expr = (
+                gp.quicksum(p[g, t, y] for g in G_en_bus.get(i, []))
+                + s[i, t, y]
+                + gp.quicksum(
+                    f_pos[ell, t, y] - f_neg[ell, t, y]
+                    for ell in lineas_entran[i]
+                )
+                - gp.quicksum(
+                    f_pos[ell, t, y] - f_neg[ell, t, y]
+                    for ell in lineas_salen[i]
+                )
+            )
+
+            rhs_val = float(d_ref[(i, t, y)])
+
+            name = f"bal_p_{i}_{t}_{y}"
+            R_primal[name] = w.addConstr(expr >= rhs_val, name=name)
+            RHS_expr[name] = rhs_val
+
+            name = f"bal_n_{i}_{t}_{y}"
+            R_primal[name] = w.addConstr(-expr >= -rhs_val, name=name)
+            RHS_expr[name] = -rhs_val
+
+for i in B:
+    for t in T:
+        for y in Y:
+            rhs_val = -float(d_ref[(i, t, y)])
+            name = f"ens_ub_{i}_{t}_{y}"
+            R_primal[name] = w.addConstr(-s[i, t, y] >= rhs_val, name=name)
+            RHS_expr[name] = rhs_val
+
+for ell in L_arcs:
+    i = from_bus_line[ell]
+    j = to_bus_line[ell]
+
+    for t in T:
+        for y in Y:
+            Bij = float(Bline[ell])
+
+            flow = f_pos[ell, t, y] - f_neg[ell, t, y]
+            theta_i = theta_p[i, t, y] - theta_m[i, t, y]
+            theta_j = theta_p[j, t, y] - theta_m[j, t, y]
+
+            expr = flow - Bij * (theta_i - theta_j)
+
+            name = f"dc_p_{ell}_{t}_{y}"
+            R_primal[name] = w.addConstr(expr >= 0.0, name=name)
+            RHS_expr[name] = 0.0
+
+            name = f"dc_n_{ell}_{t}_{y}"
+            R_primal[name] = w.addConstr(-expr >= 0.0, name=name)
+            RHS_expr[name] = 0.0
+
+for ell in L_arcs:
+    for t in T:
+        for y in Y:
+            Fij = float(F0[ell])
+            flow = f_pos[ell, t, y] - f_neg[ell, t, y]
+
+            name = f"flb_{ell}_{t}_{y}"
+            R_primal[name] = w.addConstr(flow >= -Fij, name=name)
+            RHS_expr[name] = -Fij
+
+            name = f"fub_{ell}_{t}_{y}"
+            R_primal[name] = w.addConstr(-flow >= -Fij, name=name)
+            RHS_expr[name] = -Fij
+
+for t in T:
+    for y in Y:
+        expr_slack = theta_p[bus_slack, t, y] - theta_m[bus_slack, t, y]
+
+        name = f"slack_p_{t}_{y}"
+        R_primal[name] = w.addConstr(expr_slack >= 0.0, name=name)
+        RHS_expr[name] = 0.0
+
+        name = f"slack_n_{t}_{y}"
+        R_primal[name] = w.addConstr(-expr_slack >= 0.0, name=name)
+        RHS_expr[name] = 0.0
+
+for g in G:
+    for t in T:
+        cap_base = float(P_disp.get((g, t), Pmax[g]))
+
+        for y in Y:
+            rhs_val = -cap_base
+            name = f"p_cap_{g}_{t}_{y}"
+            R_primal[name] = w.addConstr(-p[g, t, y] >= rhs_val, name=name)
+            RHS_expr[name] = rhs_val
+
+for g in GS:
+    pmin_g = float(Pmin.get(g, 0.0))
+
+    for t in T:
+        for y in Y:
+            name = f"sync_lb_{g}_{t}_{y}"
+            R_primal[name] = w.addConstr(
+                p[g, t, y] - pmin_g * u[g, t, y] >= 0.0,
+                name=name
+            )
+            RHS_expr[name] = 0.0
+
+            name = f"sync_ub_{g}_{t}_{y}"
+            R_primal[name] = w.addQConstr(
+                Pmax_sync_ce[g] * u[g, t, y] - p[g, t, y] >= 0.0,
+                name=name
+            )
+            RHS_expr[name] = 0.0
+
+            name = f"u_ub_{g}_{t}_{y}"
+            R_primal[name] = w.addConstr(-u[g, t, y] >= -1.0, name=name)
+            RHS_expr[name] = -1.0
+
+for m in M:
+    for y in Y:
+        name = f"x_ub_{m}_{y}"
+        R_primal[name] = w.addConstr(-xcap[m, y] >= -float(xbar[m]), name=name)
+        RHS_expr[name] = -float(xbar[m])
+
+        for t in T:
+            name = f"hsyn_lim_{m}_{t}_{y}"
+            R_primal[name] = w.addConstr(
+                float(gamma_base[m]) * xcap[m, y] - h_syn[m, t, y] >= 0.0,
+                name=name
+            )
+            RHS_expr[name] = 0.0
+
+            name = f"ffr_lim_{m}_{t}_{y}"
+            R_primal[name] = w.addConstr(
+                float(kappa_base[m]) * xcap[m, y] - r_ffr[m, t, y] >= 0.0,
+                name=name
+            )
+            RHS_expr[name] = 0.0
+
+for t in T:
+    for y in Y:
+        lhs_H = (
+            gp.quicksum(float(Hg.get(g, 0.0)) * u[g, t, y] for g in GS)
+            + gp.quicksum(h_syn[m, t, y] for m in M)
+        )
+
+        name = f"sys_H_{t}_{y}"
+        R_primal[name] = w.addConstr(lhs_H >= float(Hreq_base[y]), name=name)
+        RHS_expr[name] = float(Hreq_base[y])
+
+        name = f"sys_R_{t}_{y}"
+        R_primal[name] = w.addConstr(
+            gp.quicksum(r_ffr[m, t, y] for m in M) >= float(Rreq[y]),
+            name=name
+        )
+        RHS_expr[name] = float(Rreq[y])
+
+# ------------------------------------------------------------
+# Restricción D no dualizada
+# ------------------------------------------------------------
+
+for y in Y:
+    if y >= y_star:
+        w.addConstr(
+            gp.quicksum(float(eg[g]) * p[g, t, y] for g in GE for t in T)
+            <= epsilon_CO2_wcep,
+            name=f"D_CO2_cap_{y}"
+        )
+
+w.update()
+
+# ------------------------------------------------------------
+# Variables duales
+# ------------------------------------------------------------
+
+ydual = {}
+
+for name in R_primal.keys():
+    ub_here = GRB.INFINITY
+
+    if name.startswith("sync_ub_"):
+        ub_here = UB_sync
+
+    ydual[name] = w.addVar(
+        lb=0.0,
+        ub=ub_here,
+        name=f"ydual[{name}]"
+    )
+
+w.update()
+
+# ------------------------------------------------------------
+# Costos del forward
+# ------------------------------------------------------------
+
+c_map_w = {}
+
+for g in G:
+    for t in T:
+        for y in Y:
+            c_map_w[p[g, t, y]] = float(cg[g])
+
+for i in B:
+    for t in T:
+        for y in Y:
+            c_map_w[s[i, t, y]] = float(VOLL)
+
+for m in M:
+    for y in Y:
+        c_map_w[xcap[m, y]] = float(cinv[m])
+
+primal_vars_w = (
+    list(p.values())
+    + list(u.values())
+    + list(s.values())
+    + list(xcap.values())
+    + list(h_syn.values())
+    + list(r_ffr.values())
+    + list(f_pos.values())
+    + list(f_neg.values())
+    + list(theta_p.values())
+    + list(theta_m.values())
+)
+
+# ------------------------------------------------------------
+# Factibilidad dual A^T y <= c
+# ------------------------------------------------------------
+
+for v in primal_vars_w:
+    lhs = gp.QuadExpr()
+
+    for name, constr in R_primal.items():
+        coeff = 0.0
+
+        if isinstance(constr, gp.Constr):
+            val = w.getCoeff(constr, v)
+
+            if abs(val) > 1e-9:
+                coeff = val
+
+        elif isinstance(constr, gp.QConstr):
+            qrow = w.getQCRow(constr)
+
+            lin = qrow.getLinExpr()
+            for jj in range(lin.size()):
+                if lin.getVar(jj).sameAs(v):
+                    coeff += lin.getCoeff(jj)
+
+            for jj in range(qrow.size()):
+                v1 = qrow.getVar1(jj)
+                v2 = qrow.getVar2(jj)
+                cq = qrow.getCoeff(jj)
+
+                if v1.sameAs(v):
+                    coeff += cq * v2
+                elif v2.sameAs(v):
+                    coeff += cq * v1
+
+        if isinstance(coeff, (gp.Var, gp.LinExpr, gp.QuadExpr)):
+            lhs += coeff * ydual[name]
+        else:
+            if abs(coeff) > 1e-9:
+                lhs += coeff * ydual[name]
+
+    w.addQConstr(
+        lhs <= c_map_w.get(v, 0.0),
+        name=f"df_{v.VarName}"
+    )
+
+# ------------------------------------------------------------
+# Dualidad fuerte
+# ------------------------------------------------------------
+
+ctx = gp.quicksum(c_map_w.get(v, 0.0) * v for v in primal_vars_w)
+
+bty = gp.QuadExpr()
+
+for name in R_primal.keys():
+    rhs = RHS_expr[name]
+
+    if isinstance(rhs, (gp.Var, gp.LinExpr, gp.QuadExpr)):
+        bty += rhs * ydual[name]
+    else:
+        bty += float(rhs) * ydual[name]
+
+w.addQConstr(
+    ctx - bty <= 0.0,
+    name="StrongDuality"
+)
+
+# ------------------------------------------------------------
+# Objetivo L1
+# ------------------------------------------------------------
+
+dPsync = w.addVars(GS, lb=0.0, name="dPsync")
+
+for g in GS:
+    base = Pmax_sync_base[g]
+    diff = Pmax_sync_ce[g] - base
+
+    w.addConstr(dPsync[g] >= diff, name=f"dPsync_pos[{g}]")
+    w.addConstr(dPsync[g] >= -diff, name=f"dPsync_neg[{g}]")
+
+
+if USE_PERCENT_OBJECTIVE:
+    obj_wcep = gp.LinExpr()
+
+    for g in GS:
+        base = abs(float(Pmax_sync_base[g]))
+        if base > 1e-9:
+            obj_wcep += alpha_Psync * dPsync[g] / base
+        else:
+            obj_wcep += alpha_Psync * dPsync[g]
+
+
+    w.setObjective(obj_wcep, GRB.MINIMIZE)
+
+else:
+    w.setObjective(
+        alpha_Psync * dPsync.sum(),
+        GRB.MINIMIZE
+    )
+
+
+# ============================================================
+# 11) OPTIMIZAR WCEP FINAL
+# ============================================================
+
+print("\n" + "="*70)
+print("RESOLVIENDO WCEP FINAL IEEE57")
+print("="*70)
+
+w.optimize()
+
+# Registro de tiempos/GAP WCEP
+runtime_wcep = float(w.Runtime)
+status_wcep = int(w.Status)
+sol_count_wcep = int(w.SolCount)
+
+print("\n" + "="*70)
+print("REGISTRO DE OPTIMIZACIÓN WCEP IEEE57")
+print("="*70)
+print(f"Status Gurobi = {status_wcep}")
+print(f"Tiempo optimize() = {runtime_wcep:.2f} s = {runtime_wcep/60:.2f} min = {runtime_wcep/3600:.2f} h")
+print(f"Soluciones encontradas = {sol_count_wcep}")
+
+if sol_count_wcep > 0:
+    print(f"Mejor objetivo encontrado = {float(w.ObjVal):.8f}")
+    print(f"Mejor bound               = {float(w.ObjBound):.8f}")
+    print(f"MIPGap                    = {float(w.MIPGap):.6e}")
+    print(f"MIPGap (%)                = {100*float(w.MIPGap):.4f}%")
+else:
+    print("No se encontró solución factible.")
+
+total_script_time = time.time() - t0_total_script
+print(f"Tiempo total script = {total_script_time:.2f} s = {total_script_time/60:.2f} min = {total_script_time/3600:.2f} h")
+
+
+# ============================================================
+# 12) RESULTADOS WCEP FINAL
+# ============================================================
+
+print("\n" + "="*70)
+print("RESULTADOS WCEP FINAL IEEE57")
+print("="*70)
+print(f"Status = {w.Status}")
+
+if w.Status == GRB.OPTIMAL:
+    print(f"✅ WCEP OPTIMAL. Obj = {w.ObjVal:.8f}")
+
+elif w.Status == GRB.SUBOPTIMAL:
+    print(f"⚠️ WCEP SUBOPTIMAL. Obj = {w.ObjVal:.8f}")
+
+elif w.Status in [GRB.INFEASIBLE, GRB.INF_OR_UNBD]:
+    print("❌ WCEP infactible o INF_OR_UNBD.")
+else:
+    if w.SolCount > 0:
+        print(f"⚠️ WCEP terminó con status {w.Status}, pero tiene solución.")
+        print(f"Obj = {w.ObjVal:.8f}")
+    else:
+        print(f"⚠️ WCEP terminó con status {w.Status} y sin solución.")
+
+if w.SolCount > 0:
+
+    tol = 1e-6
+
+    print("\n" + "="*70)
+    print("CAMBIOS ÓPTIMOS EN PARÁMETROS MUTABLES")
+    print("="*70)
+
+    print("\n--- Pmax_sync_ce síncronos ---")
+    print(f"Cotas usadas: {P_SYNC_LB_FACTOR:.2f}*Pmax_base <= Pmax_sync_ce <= {P_SYNC_UB_FACTOR:.2f}*Pmax_base")
+    hubo_cambio = False
+
+    for g in GS:
+        val = float(Pmax_sync_ce[g].X)
+        base = float(Pmax_sync_base[g])
+
+        if abs(val - base) > tol:
+            hubo_cambio = True
+            pct = 100.0 * (val / base - 1.0) if abs(base) > 1e-9 else float("inf")
+            print(f"{g}: {base:.4f} -> {val:.4f}   ({pct:+.2f}%)")
+
+    if not hubo_cambio:
+        print("Sin cambios relevantes.")
+
+    print("\n--- Hreq fijo ---")
+    for y in Y:
+        print(f"Año {y}: Hreq_base fijo = {float(Hreq_base[y]):.6f}")
+
+    print("\n" + "="*70)
+    print("REVISIÓN DUALIDAD FUERTE")
+    print("="*70)
+
+    ctx_val = ctx.getValue()
+    bty_val = bty.getValue()
+
+    print(f"c^T x  = {ctx_val:.8f}")
+    print(f"b^T y  = {bty_val:.8f}")
+    print(f"gap    = {ctx_val - bty_val:.6e}")
+
+    print("\n" + "="*70)
+    print("EMISIONES ANUALES DE LA SOLUCIÓN WCEP")
+    print("="*70)
+
+    for y in Y:
+        emis_y = sum(
+            float(eg[g]) * float(p[g, t, y].X)
+            for g in GE
+            for t in T
+        )
+
+        if y >= y_star:
+            holgura = epsilon_CO2_wcep - emis_y
+            print(
+                f"Año {y}: emisiones = {emis_y:.6f} | "
+                f"límite D = {epsilon_CO2_wcep:.6f} | "
+                f"holgura = {holgura:.6f}"
+            )
+        else:
+            print(
+                f"Año {y}: emisiones = {emis_y:.6f} | "
+                f"sin restricción D"
+            )
+
+    print("\n" + "="*70)
+    print("CHEQUEO H Y R")
+    print("="*70)
+
+    for y in Y:
+        for t in T:
+            H_sync_val = sum(
+                float(Hg.get(g, 0.0)) * float(u[g, t, y].X)
+                for g in GS
+            )
+
+            H_syn_val = sum(
+                float(h_syn[m, t, y].X)
+                for m in M
+            )
+
+            H_total = H_sync_val + H_syn_val
+            H_lim = float(Hreq_base[y])
+
+            R_total = sum(
+                float(r_ffr[m, t, y].X)
+                for m in M
+            )
+
+            R_lim = float(Rreq[y])
+
+            print(
+                f"(y={y}, t={t}) | "
+                f"H_total={H_total:.6f}, Hreq_base={H_lim:.6f}, margen_H={H_total - H_lim:.6e} | "
+                f"R_total={R_total:.6f}, Rreq={R_lim:.6f}, margen_R={R_total - R_lim:.6e}"
+            )
+
+    print("\n" + "="*70)
+    print("REVISIÓN DE DUALES ACOTADAS")
+    print("="*70)
+
+    hits_H = 0
+    hits_sync = 0
+
+    for name, var in ydual.items():
+        if name.startswith("sys_H_"):
+            if abs(var.X - UB_H) <= 1e-6 * max(1.0, UB_H):
+                hits_H += 1
+
+        elif name.startswith("sync_ub_"):
+            if abs(var.X - UB_sync) <= 1e-6 * max(1.0, UB_sync):
+                hits_sync += 1
+
+    print(f"Duales sys_H pegadas a cota   : {hits_H}")
+    print(f"Duales sync_ub pegadas a cota : {hits_sync}")
+
+else:
+    print("\nNo hay solución WCEP disponible para reportar.")
