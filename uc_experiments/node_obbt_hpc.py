@@ -151,8 +151,8 @@ def _make_decomp(g, bL_box, bU_box, budget, seed_interp, max_iter,
         foil_extra_constr_fn=g["foil_fn"],
         b0=g["b0"], b_bounds=(bL_box, bU_box), b_free_idx=g["free_idx"],
         big_M_mu=1e4, eps_obj=1e-3, max_iter=max_iter,
-        verbose=True, w=g["w"], comp_mode="strongdual",
-        master_time_limit=budget, master_output_flag=0, master_mip_gap=1e-4,
+        verbose=True, w=g["w"],
+        master_time_limit=budget, master_output_flag=int(os.environ.get("CE_MASTER_LOG", "0")), master_mip_gap=1e-4,
         b_hat_hint=b_hint, seed_patterns=True, seed_interp=seed_interp,
         bilinear_exact=True, obbt=True, obbt_iter=1,   # iter=1: valid without the guard
         master_mip_focus=3, master_multistart=1, master_seed=0,
@@ -510,9 +510,27 @@ def _round_resources(budget, max_iter, deep=False):
     """Memory/walltime heuristic measured on the IEEE-14 a05 campaign: boxes
     solved at deep budgets (>=1800 s master TL) peak well above 12G — 12G OOMs,
     24G holds. Walltime covers max_iter CCG iterations at full budget + margin."""
-    deep = deep or budget >= 1800
+    if budget >= 1800:
+        # 2026-08-21: the walltime now SCALES with the master TL instead of
+        # being pinned at 4h, because `budget` is a PER-MASTER-SOLVE limit and
+        # a hard box ends at its FIRST master time limit -- rounds 1-4 show the
+        # tell-tale ~1h00 elapsed clustering at budget=3600, i.e. max_iter is
+        # never reached and sizing the wall at max_iter*budget over-reserved by
+        # ~4x. That over-reservation is exactly what NLHPC's monitors cancelled
+        # two of our jobs for. 3x covers the widest ratio actually observed
+        # (round 0's longest task ran 3h01 on a 1h master TL), + 30 min margin.
+        #
+        # deep=True remains the OOM-retry path and escalates MEMORY only. It
+        # must escalate or the retry is a no-op: it used to collapse into the
+        # same 16G because `deep = deep or budget >= 1800` made the two tiers
+        # identical for any budget >= 1800. Boxes 68/69 -- children of box 56,
+        # the hardest box -- were OOM-killed at 16G after ~50 min, and would
+        # have been resubmitted at 16G and killed again, halting the drive with
+        # "failed twice". 16G keeps ~33% headroom over the 12.04 GB peak
+        # measured with seff over round 0; 32G is the escalation tier.
+        return ("32G" if deep else "16G"), int(3 * budget + 1800)
     if deep:
-        return "24G", 5 * 3600        # the proven IEEE-14 a05 deep-round envelope
+        return "32G", 4 * 3600
     secs = min(int(1.3 * max_iter * budget) + 900, 5 * 3600)
     return "12G", max(secs, 3000)
 

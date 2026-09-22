@@ -92,13 +92,10 @@ class UCDecomp4b:
         master_time_limit: Optional[float] = None,  # seconds per master MILP solve
         master_output_flag: int = 0,   # 1 to print Gurobi log for every master solve
         master_mip_gap: float = 1e-4,  # relative MIP gap tolerance
-        comp_mode: str = "sos1",  # complementarity mode: "bigM" | "indicator" | "sos1" | "hybrid" | "strongdual"
         b_hat_hint: Optional[np.ndarray] = None,  # known CE (e.g. from B&S) to warm-start each master
         seed_patterns: bool = False,  # seed KKT blocks for plain-optima at {b0, b_hat, bU} before loop
-        mccormick_mu_factor: Optional[float] = None,  # strongdual: tighten McCormick mu-box to factor*max(observed mu); None = provable M_mu
-        mccormick_segments: int = 1,  # strongdual: K piecewise-McCormick segments on b (1 = single envelope)
-        bilinear_exact: bool = False,  # strongdual (Fix 3): write b·μ as the exact product and solve the master as a non-convex MIQCP (Gurobi NonConvex=2) — exact valid LB, no McCormick gap
-        obbt: bool = False,        # strongdual+bilinear_exact: root OBBT on μ_p/μ_m bounds for free lines (provably valid LB lever — see DECOMP_OBBT_offload.md)
+        bilinear_exact: bool = True,  # write b·μ as the exact product and solve the master as a non-convex MIQCP (Gurobi NonConvex=2) — exact valid LB, no McCormick gap. This is the published setting; _obbt_root flips it to False internally to build its linear relaxation (see there).
+        obbt: bool = False,        # root OBBT on μ_p/μ_m bounds for free lines (provably valid LB lever — see DECOMP_OBBT_offload.md)
         obbt_safety: float = 1e-6, # additive+relative safety margin on OBBT-tightened μ UBs
         obbt_iter: int = 1,        # number of root OBBT passes. DEFAULT 1: the 2nd+ pass (iterated/sequential re-tightening) can numerically push a μ UB below the strong-duality dual value at a known CE and produce an INVALID LB (deterministically excluded b_BS on IEEE 39 at iter=2). A per-pass self-validation guard (see _obbt_root) now rolls back any pass that would exclude the hint CE, so iter>1 is safe-but-capped; 1 is the conservative default.
         eps_ce_strict: float = 1.0,  # absolute CE gap (v_foil-v_plain) below which b_k is a STRICT CE — gates best_F/F-cap/warm-start refresh (exact master). Loose tolerant CEs (≤ EPS_REL_CE·|vp|) are NOT used to refresh state (would break exact-cut warm starts). See DECOMP_state.md "strict vs tolerant CE".
@@ -108,7 +105,7 @@ class UCDecomp4b:
         master_threads: Optional[int] = None,  # Gurobi Threads for the master solve (HPC). None = all cores.
         master_multistart: int = 1,  # solve each per-iteration master with this many Gurobi seeds, keep the MAX ObjBound (valid LB) — beats NonConvex-MIQCP bound variance; >1 only re-solves when the first solve hits the time limit (no variance to exploit if OPTIMAL). HPC-parallelizable.
         obbt_refresh: bool = False,  # re-run root OBBT after best_F (the F≤F_hint cap) tightens to a better strict CE — the tighter cap shrinks the b/μ bounds further (iterated OBBT).
-        node_obbt: bool = False,     # STANDARDIZED solver: replace the single-MIQCP master solve with an explicit spatial branch-and-bound over the shared b-box, running OBBT at every box (Strategy 5 "per-node OBBT"). Gurobi's callbacks cannot tighten node-local bounds, so we drive the spatial tree ourselves and call Gurobi only to BOUND each box. Valid: global_LB = min over an exhaustive b-box partition of each box's Gurobi ObjBound. Boxes are independent → HPC-parallelizable. Requires comp_mode='strongdual' + bilinear_exact + obbt.
+        node_obbt: bool = False,     # STANDARDIZED solver: replace the single-MIQCP master solve with an explicit spatial branch-and-bound over the shared b-box, running OBBT at every box (Strategy 5 "per-node OBBT"). Gurobi's callbacks cannot tighten node-local bounds, so we drive the spatial tree ourselves and call Gurobi only to BOUND each box. Valid: global_LB = min over an exhaustive b-box partition of each box's Gurobi ObjBound. Boxes are independent → HPC-parallelizable. Requires bilinear_exact + obbt.
         node_obbt_budget: float = 90.0,    # per-box master MIQCP time limit (s)
         node_obbt_max_nodes: int = 16,     # max boxes to PROCESS before stopping (budget cap); the reported LB stays valid at any stop
         node_obbt_tol: Optional[float] = None,  # spatial-B&B gap tolerance (global_UB − global_LB); None ⇒ eps_obj
@@ -133,13 +130,6 @@ class UCDecomp4b:
         self.master_time_limit  = float(master_time_limit) if master_time_limit is not None else None
         self.master_output_flag = int(master_output_flag)
         self.master_mip_gap     = float(master_mip_gap)
-        if comp_mode not in ("bigM", "indicator", "sos1", "hybrid", "strongdual"):
-            raise ValueError(
-                f"comp_mode must be 'bigM', 'indicator', 'sos1', 'hybrid', or "
-                f"'strongdual'; got {comp_mode!r}"
-            )
-        self.comp_mode = comp_mode
-
         self.eps_weak = float(eps_weak)
         self.eps_obj  = float(eps_obj)
         self.max_iter = int(max_iter)
@@ -159,13 +149,6 @@ class UCDecomp4b:
 
         self.b_hat_hint  = np.array(b_hat_hint, dtype=float) if b_hat_hint is not None else None
         self.seed_patterns = bool(seed_patterns)
-        self.mccormick_mu_factor = (float(mccormick_mu_factor)
-                                    if mccormick_mu_factor is not None else None)
-        # Tightened McCormick mu-box (single global value) for strongdual mode.
-        # None ⇒ _add_iteration_block falls back to the provable M_mu floor.
-        # Set by _estimate_mu_box() when mccormick_mu_factor is given.
-        self._mu_box: Optional[float] = None
-        self.mccormick_segments = max(1, int(mccormick_segments))
         self.bilinear_exact = bool(bilinear_exact)
         self.obbt          = bool(obbt)
         self.obbt_safety   = float(obbt_safety)
@@ -188,16 +171,11 @@ class UCDecomp4b:
         self.time_limit          = (float(time_limit) if time_limit is not None else None)
         self._t_start            = None   # set at run() entry
         if self.node_obbt:
-            # Node-OBBT only makes sense on the exact-bilinear strongdual master
-            # (it tightens μ/b per box to sharpen Gurobi's spatial relaxation of
+            # Node-OBBT only makes sense on the exact-bilinear master (it
+            # tightens μ/b per box to sharpen Gurobi's spatial relaxation of
             # b·μ) and needs the OBBT machinery.  Auto-enable the prerequisites
             # rather than fail, with a warning, so a single switch standardizes
             # the pipeline across grids.
-            if self.comp_mode != "strongdual":
-                raise ValueError(
-                    "node_obbt requires comp_mode='strongdual' (it operates on "
-                    "the strong-duality master's flow duals μ_p/μ_m)."
-                )
             if not self.bilinear_exact:
                 self.bilinear_exact = True
                 if self.verbose:
@@ -511,39 +489,9 @@ class UCDecomp4b:
             GRB.MINIMIZE,
         )
 
-        # Piecewise-McCormick segment structure on the shared b[ell] (strongdual,
-        # K>1).  GLOBAL per free line — segment binaries are nFree×K total (b is
-        # one variable per line, shared across time/patterns).  Partition
-        # [bL,bU] into K segments; b[ell] = Σ_k bseg[ell,k] with exactly one
-        # active segment.  _add_iteration_block uses the active segment's tighter
-        # [β_k, β_{k+1}] bounds in the per-segment McCormick envelope.
-        bdelta: Dict = {}
-        bseg:   Dict = {}
-        breaks: Dict = {}
-        K = self.mccormick_segments
-        if self.comp_mode == "strongdual" and K > 1:
-            for ell in self.free:
-                bLe, bUe = float(self.bL[ell]), float(self.bU[ell])
-                beta = [bLe + (bUe - bLe) * k / K for k in range(K + 1)]
-                breaks[ell] = beta
-                d_k, s_k = [], []
-                for k in range(K):
-                    d = m.addVar(vtype=GRB.BINARY, name=f"bdelta[{ell},{k}]")
-                    sgv = m.addVar(lb=0.0, name=f"bseg[{ell},{k}]")
-                    # bseg nonzero only in the active segment, within [β_k, β_{k+1}]
-                    m.addConstr(sgv >= beta[k]     * d, name=f"bseg_lo[{ell},{k}]")
-                    m.addConstr(sgv <= beta[k + 1] * d, name=f"bseg_hi[{ell},{k}]")
-                    d_k.append(d); s_k.append(sgv)
-                m.addConstr(gp.quicksum(d_k) == 1, name=f"bdelta_sum[{ell}]")
-                m.addConstr(b_vars[ell] == gp.quicksum(s_k), name=f"bseg_link[{ell}]")
-                bdelta[ell] = d_k
-                bseg[ell]   = s_k
-
         m.update()
 
-        master_vars = {"var": var, "b": b_vars, "bp": bp, "bm": bm,
-                       "sos_pairs": [], "bdelta": bdelta, "bseg": bseg,
-                       "breaks": breaks}
+        master_vars = {"var": var, "b": b_vars, "bp": bp, "bm": bm}
         return m, master_vars
 
     # ------------------------------------------------------------------
@@ -579,29 +527,19 @@ class UCDecomp4b:
         bU = self.bU
         free_set = self._free_set
 
-        # Dual big-M floors.  big_M_multiplier > 1 loosens for debugging.
+        # Provable upper bound on the flow duals μ_p/μ_m.  This is the ȳ of the
+        # paper: it bounds both factors of the bilinear product b·μ so Gurobi's
+        # spatial branch-and-bound has a finite box, and it is the μ box of the
+        # McCormick envelope that _obbt_root maximises over.
         VOLL  = float(data.voll)
         _mf   = self.big_M_multiplier          # 1.0 in production, e.g. 10.0 for debug
-        # _max_c_curt computed first — needed by M_mu, M_shed, M_curt (Bug 7/8/9).
         _max_c_curt = (max(float(np.max(r.curt_cost)) for r in data.rens)
                        if data.rens else 0.0)
         # M_mu floor: μ_p = π_fr − π_to − ν + μ_m; in the radial / simplified case
         # ν ≈ π_to−π_fr and μ_p ≤ π_fr − π_to ≤ π_max − π_min = 2·VOLL + 2·c_curt.
         # Bug 9: was max(big_M_mu, VOLL) — used only π_min (= −VOLL) instead of the
-        # full π range, same arithmetic error as Bug 1 for M_shed.
+        # full π range.
         M_mu    = max(self.big_M_mu, 2.0 * VOLL + 2.0 * _max_c_curt) * _mf
-        M_gen   = max(self.big_M_oth.get("gen",   M_mu),    VOLL) * _mf
-        M_ramp  = max(self.big_M_oth.get("ramp",  M_mu), 3.0 * VOLL) * _mf
-        # M_shed: gsh_lb = VOLL + pi + gsh_ub; pi ≥ −VOLL when only shedding, gsh_ub ≥ 0.
-        # Bug 1: was VOLL (off by pi range). Bug 8 (cascade from Bug 7): after M_curt fix,
-        # pi_max = max_c_curt + M_curt = 2*max_c_curt + VOLL (not VOLL), so
-        # gsh_lb ≤ VOLL + pi_max = 2*VOLL + 2*max_c_curt.
-        M_shed  = (2.0 * VOLL + 2.0 * _max_c_curt) * _mf
-        # M_curt: gcu_lb = c_curt − pi + gcu_ub; pi ≥ −VOLL when shedding active,
-        # so gcu_lb ≤ max_c_curt + VOLL.  Bug 7: was max(c_curt, VOLL) = VOLL,
-        # needs a SUM (same root cause as Bug 1 — pi range ignored).
-        M_curt  = (_max_c_curt + VOLL) * _mf
-        M_shift = max(self.big_M_oth.get("shift", M_mu),    VOLL) * _mf
 
         s = f"_{j}"   # variable name suffix
 
@@ -802,133 +740,6 @@ class UCDecomp4b:
                 e += _eta_sum(b, t, -1.0)
                 m.addConstr(e == 0.0)
 
-        # ---- Complementarity ----
-        # M_d, M_s are ignored for indicator/sos1 modes (kept in signature for
-        # uniform call sites so nothing else changes).
-        # z's are always named zbm{s}_{tag} (regardless of mode) so
-        # _analytic_warm_start.set_z can look them up by name uniformly.
-        # z-convention is unified across bigM/indicator: z=1 → dual=0
-        # (constraint slack), z=0 → slack=0 (constraint binding).
-        def _comp(dual_var, slack_expr, M_d, M_s, tag: str,
-                  is_bilinear: bool = False):
-            """Enforce dual ⟂ slack (at most one nonzero).  `tag` is a unique
-            string per call (per pattern j) used to name the z variable.
-
-            bigM     : dual ≤ M_d*(1-z),  slack ≤ M_s*z            [binary]
-            indicator: z=1 → dual=0,       z=0 → slack=0            [binary, M-free]
-            sos1     : SOS1({dual, slack})                           [no binary, M-free]
-            hybrid   : bigM if is_bilinear else indicator
-                       — use for pairs where `slack_expr` contains a master
-                       decision variable (the flow-limit slack `b[ell]±f^j`),
-                       which forces a big-M encoding.  All other pairs have
-                       constant RHS and can use indicators, which Gurobi
-                       enforces via B&B branching (NOT linearised internally
-                       with big-M), so they don't loosen the LP relaxation.
-                       See DECOMP_lb_stagnation.md Fix 1.
-            strongdual: no per-pair encoding — complementarity is replaced
-                       globally by one strong-duality equality plus McCormick
-                       envelopes on the bilinear flow terms (built after the
-                       optimality cut below).  See DECOMP_lb_stagnation.md Fix 2.
-            """
-            mode = self.comp_mode
-            if mode == "strongdual":
-                return  # handled by the strong-duality block after the opt cut
-            if mode == "hybrid":
-                mode = "bigM" if is_bilinear else "indicator"
-
-            if mode == "bigM":
-                z = m.addVar(vtype=GRB.BINARY, name=f"zbm{s}_{tag}")
-                m.addConstr(dual_var <= M_d * (1 - z))
-                m.addConstr(slack_expr <= M_s * z)
-
-            elif mode == "indicator":
-                z = m.addVar(vtype=GRB.BINARY, name=f"zbm{s}_{tag}")
-                # Match bigM convention: z=1 → dual=0, z=0 → slack=0
-                m.addGenConstrIndicator(z, True, dual_var, GRB.LESS_EQUAL, 0.0)
-                if isinstance(slack_expr, gp.Var):
-                    m.addGenConstrIndicator(z, False, slack_expr, GRB.LESS_EQUAL, 0.0)
-                else:
-                    s_aux = m.addVar(lb=-GRB.INFINITY, name=f"saux_ind{s}_{tag}")
-                    m.addConstr(s_aux == slack_expr)
-                    m.addGenConstrIndicator(z, False, s_aux, GRB.LESS_EQUAL, 0.0)
-
-            elif mode == "sos1":
-                if isinstance(slack_expr, gp.Var):
-                    m.addSOS(GRB.SOS_TYPE1, [dual_var, slack_expr])
-                    master_vars["sos_pairs"].append((dual_var, slack_expr))
-                else:
-                    s_aux = m.addVar(lb=0.0, name=f"saux_sos{s}_{tag}")
-                    m.addConstr(s_aux == slack_expr)
-                    m.addSOS(GRB.SOS_TYPE1, [dual_var, s_aux])
-                    master_vars["sos_pairs"].append((dual_var, s_aux))
-
-        # Flow limits.
-        # is_bilinear=True ONLY for free lines, where `cap = b_vars[ell]`
-        # makes the slack `cap ± f_j` depend on a master decision variable.
-        # In hybrid mode this routes free-line flow pairs to bigM (required)
-        # and fixed-line flow pairs to indicators (constant RHS, no LP loosening).
-        for ell in range(nL):
-            for t in range(T):
-                if ell in free_set:
-                    cap = b_vars[ell]
-                    M_s = 2.0 * float(bU[ell])
-                    is_bln = True
-                else:
-                    cap = float(b0[ell])
-                    M_s = 2.0 * cap if cap > 0 else 1.0
-                    is_bln = False
-                _comp(mu_p[ell, t], cap - f_j[ell, t],  M_mu, M_s,
-                      tag=f"mup_{ell}_{t}", is_bilinear=is_bln)
-                _comp(mu_m[ell, t], cap + f_j[ell, t],  M_mu, M_s,
-                      tag=f"mum_{ell}_{t}", is_bilinear=is_bln)
-
-        # Generator bounds
-        for g, gen in enumerate(data.gens):
-            Pmin, Pmax = float(gen.Pmin), float(gen.Pmax)
-            for t in range(T):
-                uj = float(u_j[g, t])
-                _comp(lam_hi[g, t], Pmax * uj - p_j[g, t], M_gen, Pmax + 1.0, tag=f"lhi_{g}_{t}")
-                _comp(lam_lo[g, t], p_j[g, t] - Pmin * uj, M_gen, Pmax + 1.0, tag=f"llo_{g}_{t}")
-
-        # Ramp — use direction-specific big-M since RD may differ from RU
-        for g, gen in enumerate(data.gens):
-            RU, RD = float(gen.RU), float(gen.RD)
-            Pmax   = float(gen.Pmax)
-            p0g    = float(p_init[g])
-            M_up   = Pmax + RU
-            M_dn   = Pmax + RD
-            M_up_i = p0g + RU
-            M_dn_i = Pmax + RD
-            _comp(rho_up_i[g], p0g + RU - p_j[g, 0], M_ramp, max(M_up_i, 1.0), tag=f"rui_{g}")
-            _comp(rho_dn_i[g], p_j[g, 0] - p0g + RD, M_ramp, max(M_dn_i, 1.0), tag=f"rdi_{g}")
-            for t in range(1, T):
-                _comp(rho_up[g, t], p_j[g, t-1] + RU - p_j[g, t], M_ramp, max(M_up, 1.0), tag=f"rup_{g}_{t}")
-                _comp(rho_dn[g, t], p_j[g, t]   + RD - p_j[g, t-1], M_ramp, max(M_dn, 1.0), tag=f"rdn_{g}_{t}")
-
-        # Shed
-        for b in range(nB):
-            for t in range(T):
-                d = float(data.demand[b, t])
-                _comp(gsh_ub[b, t], d - shed_j[b, t], M_shed, d + 1.0, tag=f"gshub_{b}_{t}")
-                _comp(gsh_lb[b, t], shed_j[b, t],     M_shed, d + 1.0, tag=f"gshlb_{b}_{t}")
-
-        # Curtailment
-        for r, ren in enumerate(data.rens):
-            for t in range(T):
-                av = float(ren.avail[t])
-                _comp(gcu_ub[r, t], av - curt_j[r, t], M_curt, av + 1.0, tag=f"gcuub_{r}_{t}")
-                _comp(gcu_lb[r, t], curt_j[r, t],      M_curt, av + 1.0, tag=f"gculb_{r}_{t}")
-
-        # Shifting
-        for b in range(nB):
-            for t in range(T):
-                spm = float(data.Splus_max[b, t])
-                smm = float(data.Sminus_max[b, t])
-                _comp(gsp_ub[b, t], spm - sp_j[b, t], M_shift, spm + 1.0, tag=f"gspub_{b}_{t}")
-                _comp(gsp_lb[b, t], sp_j[b, t],       M_shift, spm + 1.0, tag=f"gsplb_{b}_{t}")
-                _comp(gsm_ub[b, t], smm - sm_j[b, t], M_shift, smm + 1.0, tag=f"gsmub_{b}_{t}")
-                _comp(gsm_lb[b, t], sm_j[b, t],       M_shift, smm + 1.0, tag=f"gsmlb_{b}_{t}")
-
         # ---- Optimality cut: c^T(x_foil) ≤ c^T(x^j, u^j) ----
         # Foil cost (master decision variables — includes binary u_foil)
         foil_cost = gp.LinExpr()
@@ -968,7 +779,7 @@ class UCDecomp4b:
 
         m.addConstr(foil_cost <= lp_var + lp_const, name=f"opt_cut{s}")
 
-        # ---- Strong-duality reformulation (comp_mode="strongdual") ----------
+        # ---- Strong-duality reformulation ----------------------------------
         # Replaces ALL complementarity with one equality  c^T x^j = dual_obj,
         # combined with the primal feasibility + stationarity already added.
         # For an LP, {primal feas, dual feas (=stationarity), strong duality}
@@ -977,119 +788,97 @@ class UCDecomp4b:
         # we linearise b·μ with McCormick auxiliaries w (= b·μ).  Fixed lines
         # have constant cap=b0 so their term stays linear.
         # dual_obj verified == c^T x* on IEEE 14 (see dev/_verify_strongdual.py).
-        if self.comp_mode == "strongdual":
-            # mu box for McCormick: μ ∈ [0, M_box].  Default M_box = M_mu (the
-            # provable flow-dual bound, Bug 9) — safe but loose (observed μ is
-            # 16-81× smaller, so the envelope is slack).  If a tightened box was
-            # estimated (_estimate_mu_box, Technique 3 / Option A) use it instead
-            # — HEURISTIC, must be re-validated at known CEs (debug_fix_b).
-            M_box = self._mu_box if self._mu_box is not None else M_mu
-            K_seg = self.mccormick_segments
-            use_pw = (K_seg > 1) and bool(master_vars.get("bseg"))
-            # Fix 3: exact bilinear b·μ via a non-convex MIQCP (Gurobi spatial
-            # B&B).  No McCormick/piecewise relaxation ⇒ no inflation ⇒ exact
-            # valid LB.  Requires finite μ bounds (set via .UB = M_box) and
-            # NonConvex=2 on the model (set below once the quad constraint exists).
-            exact = bool(self.bilinear_exact)
+        # μ box: μ ∈ [0, M_box], the provable flow-dual bound (the paper's ȳ).
+        M_box = M_mu
+        # Exact bilinear b·μ via a non-convex MIQCP (Gurobi spatial B&B).  No
+        # McCormick relaxation ⇒ no inflation ⇒ exact valid LB.  Requires
+        # finite μ bounds (set via .UB = M_box) and NonConvex=2 on the model
+        # (set below once the quad constraint exists).  This is the published
+        # setting.  exact=False is reached ONLY from _obbt_root, which flips
+        # bilinear_exact off to build the linear relaxation it maximises μ
+        # over — do not delete the McCormick branch below, OBBT needs it.
+        exact = bool(self.bilinear_exact)
 
-            def _flow_w(dv, ell, t, tag):
-                """Build w (= b[ell]·dv) via McCormick; return list of w vars to
-                subtract in dual_obj.  Single-envelope when K=1; disaggregated
-                piecewise (per b-segment) when K>1 — the latter also links
-                dv = Σ_k μseg_k so the dual var stays consistent with stationarity.
-                """
-                bLe = float(self.bL[ell]); bUe = float(self.bU[ell])
-                bvar = b_vars[ell]
-                if not use_pw:
-                    wv = m.addVar(lb=0.0, name=f"{tag}{s}[{ell},{t}]")
-                    m.addConstr(wv >= bLe * dv)
-                    m.addConstr(wv >= bUe * dv + M_box * bvar - bUe * M_box)
-                    m.addConstr(wv <= bUe * dv)
-                    m.addConstr(wv <= bLe * dv + M_box * bvar - bLe * M_box)
-                    return [wv]
-                beta = master_vars["breaks"][ell]
-                d_k  = master_vars["bdelta"][ell]
-                bs_k = master_vars["bseg"][ell]
-                museg, wseg = [], []
-                for k in range(K_seg):
-                    ms = m.addVar(lb=0.0, name=f"{tag}_ms{s}[{ell},{t},{k}]")
-                    wv = m.addVar(lb=0.0, name=f"{tag}_w{s}[{ell},{t},{k}]")
-                    m.addConstr(ms <= M_box * d_k[k])               # μseg active only in segment k
-                    # per-segment McCormick: wv = bseg·ms, b∈[β_k,β_{k+1}], μ∈[0,M_box]
-                    m.addConstr(wv >= beta[k]     * ms)
-                    m.addConstr(wv >= beta[k + 1] * ms + M_box * bs_k[k] - beta[k + 1] * M_box * d_k[k])
-                    m.addConstr(wv <= beta[k + 1] * ms)
-                    m.addConstr(wv <= beta[k]     * ms + M_box * bs_k[k] - beta[k]     * M_box * d_k[k])
-                    museg.append(ms); wseg.append(wv)
-                m.addConstr(dv == gp.quicksum(museg), name=f"{tag}_link{s}[{ell},{t}]")
-                return wseg
+        def _flow_w(dv, ell, t, tag):
+            """Build w (= b[ell]·dv) via a single McCormick envelope; return
+            the w vars to subtract in dual_obj.  Used only when
+            bilinear_exact is False, i.e. for _obbt_root's LP relaxation.
+            """
+            bLe = float(self.bL[ell]); bUe = float(self.bU[ell])
+            bvar = b_vars[ell]
+            wv = m.addVar(lb=0.0, name=f"{tag}{s}[{ell},{t}]")
+            m.addConstr(wv >= bLe * dv)
+            m.addConstr(wv >= bUe * dv + M_box * bvar - bUe * M_box)
+            m.addConstr(wv <= bUe * dv)
+            m.addConstr(wv <= bLe * dv + M_box * bvar - bLe * M_box)
+            return [wv]
 
-            sd = gp.QuadExpr() if exact else gp.LinExpr()
-            # Generator bounds:  −Pmax·u·λ_hi + Pmin·u·λ_lo
-            for g, gen in enumerate(data.gens):
-                Pmin, Pmax = float(gen.Pmin), float(gen.Pmax)
+        sd = gp.QuadExpr() if exact else gp.LinExpr()
+        # Generator bounds:  −Pmax·u·λ_hi + Pmin·u·λ_lo
+        for g, gen in enumerate(data.gens):
+            Pmin, Pmax = float(gen.Pmin), float(gen.Pmax)
+            for t in range(T):
+                uj = float(u_j[g, t])
+                sd.add(lam_hi[g, t], -Pmax * uj)
+                sd.add(lam_lo[g, t],  Pmin * uj)
+        # Ramp limits
+        for g, gen in enumerate(data.gens):
+            RU, RD = float(gen.RU), float(gen.RD)
+            p0g = float(p_init[g])
+            sd.add(rho_up_i[g], -p0g - RU)
+            sd.add(rho_dn_i[g],  p0g - RD)
+            for t in range(1, T):
+                sd.add(rho_up[g, t], -RU)
+                sd.add(rho_dn[g, t], -RD)
+        # Nodal balance:  π·(Σ_ren avail − demand)
+        for b in range(nB):
+            for t in range(T):
+                avail_sum = sum(float(data.rens[r].avail[t])
+                                for r in rens_at_bus[b])
+                sd.add(pi_j[b, t], avail_sum - float(data.demand[b, t]))
+        # Flow limits:  −cap·(μ_p+μ_m); free lines use McCormick w = b·μ
+        # (single envelope, or disaggregated piecewise when K>1).
+        for ell in range(nL):
+            if ell in free_set:
                 for t in range(T):
-                    uj = float(u_j[g, t])
-                    sd.add(lam_hi[g, t], -Pmax * uj)
-                    sd.add(lam_lo[g, t],  Pmin * uj)
-            # Ramp limits
-            for g, gen in enumerate(data.gens):
-                RU, RD = float(gen.RU), float(gen.RD)
-                p0g = float(p_init[g])
-                sd.add(rho_up_i[g], -p0g - RU)
-                sd.add(rho_dn_i[g],  p0g - RD)
-                for t in range(1, T):
-                    sd.add(rho_up[g, t], -RU)
-                    sd.add(rho_dn[g, t], -RD)
-            # Nodal balance:  π·(Σ_ren avail − demand)
-            for b in range(nB):
+                    mu_p[ell, t].UB = M_box
+                    mu_m[ell, t].UB = M_box
+                    if exact:
+                        # exact bilinear: dual_obj gets −b[ell]·(μ_p+μ_m)
+                        sd += -b_vars[ell] * mu_p[ell, t]
+                        sd += -b_vars[ell] * mu_m[ell, t]
+                    else:
+                        for wv in _flow_w(mu_p[ell, t], ell, t, "wmup"):
+                            sd.add(wv, -1.0)
+                        for wv in _flow_w(mu_m[ell, t], ell, t, "wmum"):
+                            sd.add(wv, -1.0)
+            else:
+                cap = float(b0[ell])
                 for t in range(T):
-                    avail_sum = sum(float(data.rens[r].avail[t])
-                                    for r in rens_at_bus[b])
-                    sd.add(pi_j[b, t], avail_sum - float(data.demand[b, t]))
-            # Flow limits:  −cap·(μ_p+μ_m); free lines use McCormick w = b·μ
-            # (single envelope, or disaggregated piecewise when K>1).
-            for ell in range(nL):
-                if ell in free_set:
-                    for t in range(T):
-                        mu_p[ell, t].UB = M_box
-                        mu_m[ell, t].UB = M_box
-                        if exact:
-                            # exact bilinear: dual_obj gets −b[ell]·(μ_p+μ_m)
-                            sd += -b_vars[ell] * mu_p[ell, t]
-                            sd += -b_vars[ell] * mu_m[ell, t]
-                        else:
-                            for wv in _flow_w(mu_p[ell, t], ell, t, "wmup"):
-                                sd.add(wv, -1.0)
-                            for wv in _flow_w(mu_m[ell, t], ell, t, "wmum"):
-                                sd.add(wv, -1.0)
-                else:
-                    cap = float(b0[ell])
-                    for t in range(T):
-                        sd.add(mu_p[ell, t], -cap)
-                        sd.add(mu_m[ell, t], -cap)
-            # Shed / curt / shift upper bounds:  −rhs·dual
-            for b in range(nB):
-                for t in range(T):
-                    sd.add(gsh_ub[b, t], -float(data.demand[b, t]))
-                    sd.add(gsp_ub[b, t], -float(data.Splus_max[b, t]))
-                    sd.add(gsm_ub[b, t], -float(data.Sminus_max[b, t]))
-            for r in range(nR):
-                for t in range(T):
-                    sd.add(gcu_ub[r, t], -float(data.rens[r].avail[t]))
-            # Strong-duality equality for the DISPATCH LP:  lp_var == dual_obj.
-            # NOTE: only `lp_var` (the dispatch variable cost: p/shed/curt/sp/sm)
-            # appears — NOT lp_const.  lp_const is the commitment cost (u,v,w),
-            # which is a constant of the dispatch LP, not part of its objective,
-            # so it is absent from both the primal value and the dual objective.
-            # (The optimality cut above correctly uses lp_var+lp_const because it
-            #  compares the FULL foil cost to the FULL dispatch cost.)
-            m.addConstr(lp_var == sd, name=f"strongdual{s}")
-            if exact:
-                # Quadratic (bilinear) constraint ⇒ non-convex MIQCP.  Set here so
-                # ANY solve of this master (run, debug_fix_b, ...) is configured
-                # correctly regardless of caller.
-                m.Params.NonConvex = 2
+                    sd.add(mu_p[ell, t], -cap)
+                    sd.add(mu_m[ell, t], -cap)
+        # Shed / curt / shift upper bounds:  −rhs·dual
+        for b in range(nB):
+            for t in range(T):
+                sd.add(gsh_ub[b, t], -float(data.demand[b, t]))
+                sd.add(gsp_ub[b, t], -float(data.Splus_max[b, t]))
+                sd.add(gsm_ub[b, t], -float(data.Sminus_max[b, t]))
+        for r in range(nR):
+            for t in range(T):
+                sd.add(gcu_ub[r, t], -float(data.rens[r].avail[t]))
+        # Strong-duality equality for the DISPATCH LP:  lp_var == dual_obj.
+        # NOTE: only `lp_var` (the dispatch variable cost: p/shed/curt/sp/sm)
+        # appears — NOT lp_const.  lp_const is the commitment cost (u,v,w),
+        # which is a constant of the dispatch LP, not part of its objective,
+        # so it is absent from both the primal value and the dual objective.
+        # (The optimality cut above correctly uses lp_var+lp_const because it
+        #  compares the FULL foil cost to the FULL dispatch cost.)
+        m.addConstr(lp_var == sd, name=f"strongdual{s}")
+        if exact:
+            # Quadratic (bilinear) constraint ⇒ non-convex MIQCP.  Set here so
+            # ANY solve of this master (run, debug_fix_b, ...) is configured
+            # correctly regardless of caller.
+            m.Params.NonConvex = 2
 
         m.update()
 
@@ -1663,51 +1452,6 @@ class UCDecomp4b:
             "obj": obj_val,
         }
 
-    def _estimate_mu_box(
-        self,
-        b_seeds: List[np.ndarray],
-        window_size: int,
-        per_bus_neutrality: bool,
-        p_init: np.ndarray,
-    ) -> Optional[float]:
-        """Heuristic McCormick mu-box for strongdual (Technique 3, Option A).
-
-        Solves the dispatch LP at each seed b (with its plain-optimal pattern)
-        and returns  factor * max observed |mu_p|,|mu_m| over free lines & seeds.
-
-        WARNING: this is a HEURISTIC bound, not a provable one — the true optimal
-        flow dual at some other b in [bL,bU] may exceed the observed maximum.  If
-        the box is set below the true mu, the McCormick envelope excludes valid
-        solutions and the LB becomes INVALID (too high).  ALWAYS re-validate with
-        _check_strongdual_valid.py (debug_fix_b at a known CE) after changing the
-        factor.  See DECOMP_lb_stagnation.md / DECOMP_state.md.
-        """
-        if self.mccormick_mu_factor is None:
-            return None
-        nL = len(self.data.lines)
-        free = self.free
-        obs = 0.0
-        for b_seed in b_seeds:
-            if b_seed is None:
-                continue
-            vp, _, sp = self.oracle.solve_plain(b_seed)
-            if sp is None:
-                continue
-            u_j = np.round(sp["u"]).astype(int)
-            sol = self._solve_dispatch_lp(
-                b_seed, u_j, window_size, per_bus_neutrality, p_init)
-            if sol is None:
-                continue
-            if free:
-                obs = max(obs, float(np.max(sol["mu_p"][free])),
-                          float(np.max(sol["mu_m"][free])))
-        box = self.mccormick_mu_factor * max(obs, 1.0)
-        self._mu_box = box
-        if self.verbose:
-            print(f"[DECOMP] McCormick mu-box = {box:.2f} "
-                  f"(factor {self.mccormick_mu_factor} × observed max {obs:.2f})")
-        return box
-
     def _obbt_root(
         self,
         m: gp.Model,
@@ -1732,15 +1476,9 @@ class UCDecomp4b:
 
         Tighter μ UBs shrink Gurobi's spatial branch-and-bound box on the
         non-convex `b·μ` constraint (`bilinear_exact=True`), which is the
-        intended speedup.  No-op for comp_mode != 'strongdual' or when no
-        KKT block has been added yet.
+        intended speedup.  No-op when no KKT block has been added yet.
         """
         if not self.obbt:
-            return {"tightened": 0, "solved": 0, "shrink": 0.0}
-        if self.comp_mode != "strongdual":
-            if self.verbose:
-                print("[OBBT] comp_mode != 'strongdual' — OBBT not applicable; "
-                      "skipping.")
             return {"tightened": 0, "solved": 0, "shrink": 0.0}
         if not patterns:
             if self.verbose:
@@ -1754,7 +1492,7 @@ class UCDecomp4b:
                   f"({len(patterns)} pattern(s), {len(self.free)} free lines, "
                   f"T={T}) ...")
 
-        # Build R with the same comp_mode but bilinear_exact=False so the dual
+        # Build R with bilinear_exact=False so the dual
         # objective uses the McCormick envelope (linear) instead of the exact
         # product (non-convex).  S_exact ⊆ S_R: every (b,μ) satisfying the
         # exact constraint also satisfies the McCormick envelope (the envelope
@@ -2243,147 +1981,11 @@ class UCDecomp4b:
             set_2d("gsm_ub", sol["gsm_ub"])
             set_2d("gsm_lb", sol["gsm_lb"])
 
-            # --- 3) Pick z's based on LP slack / dual ---------------------
-            # Convention: z = 0 if constraint binding (slack ≤ tol);
-            #             z = 1 if constraint slack (dual ≤ tol).
-            # Choose by "which side is smaller": if slack > dual ⇒ z=1; else z=0.
-            # Degenerate (both small) ⇒ z=1 (favors dual=0).
-            def pick_z(dual_val, slack_val):
-                return 1 if slack_val > dual_val else 0
-
-            def set_z(tag, z_val):
-                v = m.getVarByName(f"zbm{s}_{tag}")
-                if v is not None:
-                    try: v.Start = float(z_val)
-                    except Exception: pass
-
-            # Walk through every _comp call in the SAME order as _add_iteration_block
-            free_set = self._free_set
-            b0   = self.b0
-            # Flow limits
-            for ell in range(nL):
-                cap_val = float(b_hint[ell]) if ell in free_set else float(b0[ell])
-                for t in range(T):
-                    set_z(f"mup_{ell}_{t}",
-                          pick_z(sol["mu_p"][ell, t], cap_val - sol["f"][ell, t]))
-                    set_z(f"mum_{ell}_{t}",
-                          pick_z(sol["mu_m"][ell, t], cap_val + sol["f"][ell, t]))
-            # Generator bounds
-            for g, gen in enumerate(self.data.gens):
-                Pmin = float(gen.Pmin); Pmax = float(gen.Pmax)
-                for t in range(T):
-                    uj = float(u_j[g, t])
-                    set_z(f"lhi_{g}_{t}",
-                          pick_z(sol["lam_hi"][g, t], Pmax * uj - sol["p"][g, t]))
-                    set_z(f"llo_{g}_{t}",
-                          pick_z(sol["lam_lo"][g, t], sol["p"][g, t] - Pmin * uj))
-            # Ramps
-            for g, gen in enumerate(self.data.gens):
-                RU = float(gen.RU); RD = float(gen.RD)
-                p0g = float(p_init[g])
-                set_z(f"rui_{g}",
-                      pick_z(sol["rho_up_i"][g], p0g + RU - sol["p"][g, 0]))
-                set_z(f"rdi_{g}",
-                      pick_z(sol["rho_dn_i"][g], sol["p"][g, 0] - p0g + RD))
-                for t in range(1, T):
-                    set_z(f"rup_{g}_{t}",
-                          pick_z(sol["rho_up"][g, t],
-                                  sol["p"][g, t-1] + RU - sol["p"][g, t]))
-                    set_z(f"rdn_{g}_{t}",
-                          pick_z(sol["rho_dn"][g, t],
-                                  sol["p"][g, t] + RD - sol["p"][g, t-1]))
-            # Shed
-            for b in range(nB):
-                for t in range(T):
-                    d = float(self.data.demand[b, t])
-                    set_z(f"gshub_{b}_{t}",
-                          pick_z(sol["gsh_ub"][b, t], d - sol["sh"][b, t]))
-                    set_z(f"gshlb_{b}_{t}",
-                          pick_z(sol["gsh_lb"][b, t], sol["sh"][b, t]))
-            # Curt
-            for r in range(nR):
-                for t in range(T):
-                    av = float(self.data.rens[r].avail[t])
-                    set_z(f"gcuub_{r}_{t}",
-                          pick_z(sol["gcu_ub"][r, t], av - sol["cu"][r, t]))
-                    set_z(f"gculb_{r}_{t}",
-                          pick_z(sol["gcu_lb"][r, t], sol["cu"][r, t]))
-            # Shift
-            for b in range(nB):
-                for t in range(T):
-                    spm = float(self.data.Splus_max[b, t])
-                    smm = float(self.data.Sminus_max[b, t])
-                    set_z(f"gspub_{b}_{t}",
-                          pick_z(sol["gsp_ub"][b, t], spm - sol["sp"][b, t]))
-                    set_z(f"gsplb_{b}_{t}",
-                          pick_z(sol["gsp_lb"][b, t], sol["sp"][b, t]))
-                    set_z(f"gsmub_{b}_{t}",
-                          pick_z(sol["gsm_ub"][b, t], smm - sol["sm"][b, t]))
-                    set_z(f"gsmlb_{b}_{t}",
-                          pick_z(sol["gsm_lb"][b, t], sol["sm"][b, t]))
-
-            # --- strongdual: McCormick aux w = b·μ on free lines ----------
-            # set_z calls above are harmless no-ops in this mode (no z vars);
-            # here we inject the bilinear products at the LP-optimal duals.
-            if self.comp_mode == "strongdual" and self.bilinear_exact:
-                # Exact bilinear (Fix 3): no w/segment vars — Gurobi computes
-                # b·μ from the b and μ Starts already injected above. Nothing more.
-                pass
-            elif self.comp_mode == "strongdual" and self.mccormick_segments <= 1:
-                # Single envelope: w = b_hint·μ.
-                for ell in self.free:
-                    b_e = float(b_hint[ell])
-                    for t in range(T):
-                        for nm, arr in (("wmup", sol["mu_p"]),
-                                        ("wmum", sol["mu_m"])):
-                            v = m.getVarByName(f"{nm}{s}[{ell},{t}]")
-                            if v is not None:
-                                try: v.Start = b_e * float(arr[ell, t])
-                                except Exception: pass
-            elif self.comp_mode == "strongdual":
-                # Piecewise: activate the segment k* containing b_hint[ell] and
-                # set bseg/μseg/wseg there (0 elsewhere).  bdelta/bseg are global
-                # (no s suffix); μseg/wseg are per-pattern (s suffix).
-                breaks = master_vars.get("breaks", {})
-                K = self.mccormick_segments
-                for ell in self.free:
-                    b_e = float(b_hint[ell])
-                    beta = breaks.get(ell)
-                    if beta is None:
-                        continue
-                    kstar = K - 1
-                    for k in range(K):
-                        if beta[k] - 1e-9 <= b_e <= beta[k + 1] + 1e-9:
-                            kstar = k
-                            break
-                    for k in range(K):
-                        dv = m.getVarByName(f"bdelta[{ell},{k}]")
-                        sgv = m.getVarByName(f"bseg[{ell},{k}]")
-                        if dv is not None:
-                            try: dv.Start = 1.0 if k == kstar else 0.0
-                            except Exception: pass
-                        if sgv is not None:
-                            try: sgv.Start = b_e if k == kstar else 0.0
-                            except Exception: pass
-                    for t in range(T):
-                        for nm, arr in (("wmup", sol["mu_p"]),
-                                        ("wmum", sol["mu_m"])):
-                            muval = float(arr[ell, t])
-                            for k in range(K):
-                                ms = m.getVarByName(f"{nm}_ms{s}[{ell},{t},{k}]")
-                                wv = m.getVarByName(f"{nm}_w{s}[{ell},{t},{k}]")
-                                act = (k == kstar)
-                                if ms is not None:
-                                    try: ms.Start = muval if act else 0.0
-                                    except Exception: pass
-                                if wv is not None:
-                                    try: wv.Start = (b_e * muval) if act else 0.0
-                                    except Exception: pass
-
         m.update()
         if self.verbose:
             print(f"  [WS-ANALYTIC] Done. {len(patterns)} KKT block(s) populated "
-                  f"with LP-optimal primal/dual + analytic z's.")
+                  f"with LP-optimal primal/dual. Gurobi computes b·μ from the "
+                  f"b and μ Starts injected above (exact bilinear).")
         return True
 
     # ------------------------------------------------------------------
@@ -2819,6 +2421,12 @@ class UCDecomp4b:
         # better certified CE than the input hint (e.g., cycle detection).
         candidate: Optional[Dict] = None
         termination_reason: str = "max_iter"   # default, overridden on break
+        # tl_hit is set per iteration from the master's Gurobi status; seeded True
+        # so "the exit master was solved exactly" is never claimed by default.
+        tl_hit: bool = True
+        # Per-iteration wall clock of the generation loop, for reporting the cost
+        # of CCG alone (no bounding phase).  One entry per completed iteration.
+        iter_times: List[float] = []
 
         try:
             # Warm-start: check b0
@@ -2908,15 +2516,6 @@ class UCDecomp4b:
                 if self.verbose:
                     print(f"[DECOMP] Added hint upper bound: F ≤ {F_ub:.4f}")
 
-            # ---- Tighten McCormick mu-box (Technique 3, Option A) ---------
-            # Must run BEFORE any KKT block is added (seeded or in-loop) so all
-            # strongdual blocks share the tightened box.  HEURISTIC — re-validate.
-            if self.comp_mode == "strongdual" and self.mccormick_mu_factor is not None:
-                self._estimate_mu_box(
-                    [self.b0, self.b_hat_hint, b_ws],
-                    window_size, per_bus_neutrality, p_init,
-                )
-
             # ---- Pattern seeding (Technique 2) ----------------------------
             # Pre-load KKT blocks for the plain-optimal commitment patterns at
             # the key line-capacity vectors {b0, b_hat (B&S), bU (max expand)}.
@@ -3005,6 +2604,7 @@ class UCDecomp4b:
                               f"— stopping with best result so far.")
                     termination_reason = "global_time_limit"
                     break
+                _t_iter = time.time()
                 if self.verbose:
                     nv, nc, ni = m.NumVars, m.NumConstrs, m.NumIntVars
                     print(f"\n[DECOMP] Iter {k+1}/{self.max_iter}  "
@@ -3225,7 +2825,7 @@ class UCDecomp4b:
                         # (off by default — it costs another OBBT pass per
                         # incumbent improvement).
                         if (self.obbt and self.obbt_refresh and is_new_best
-                                and self.comp_mode == "strongdual" and patterns):
+                                and patterns):
                             if self.verbose:
                                 print("  [OBBT] Re-running OBBT under the tighter "
                                       "F-cap (obbt_refresh) ...")
@@ -3241,9 +2841,12 @@ class UCDecomp4b:
                           f"— missing pattern; not refreshing best_F/cap/hint.")
 
                 # Convergence
+                iter_times.append(time.time() - _t_iter)
                 gap = self.best_F - master_LB
                 if self.verbose:
-                    print(f"  best_F={self.best_F:.4f}  gap={gap:.4f}")
+                    print(f"  best_F={self.best_F:.4f}  gap={gap:.4f}  "
+                          f"iter_time={iter_times[-1]:.1f}s  "
+                          f"master_exact={not tl_hit}")
 
                 if gap <= self.eps_obj and self.best_F < float("inf"):
                     if self.verbose:
@@ -3403,4 +3006,19 @@ class UCDecomp4b:
             # stopped because of the global time_limit (vs certifying / early exit).
             "wall_time_s": _wall,
             "hit_time_limit": bool(_hit_tl),
+            # --- Proposition 2 exit certificate (no lower bound involved) -------
+            # The generation loop's own exit is a proof of global optimality when
+            # (a) it exited because the oracle test PASSED at the master point
+            #     rather than on a budget/cycle/iteration cap, and
+            # (b) the master solved at that final iteration was solved to proven
+            #     global optimality (Gurobi OPTIMAL, not TIME_LIMIT).
+            # Then F(b) = opt M(J) = F*.  Reported independently of master_LB so a
+            # run can be read without any bounding phase.
+            "master_exact_at_exit": (not tl_hit),
+            "ccg_proof_of_optimality": bool(
+                termination_reason == "certified_optimal"
+                and not tl_hit
+                and self.best_F < float("inf")
+            ),
+            "iter_times_s": list(iter_times),
         }

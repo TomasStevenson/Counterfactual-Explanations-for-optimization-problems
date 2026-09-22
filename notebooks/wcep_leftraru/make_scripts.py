@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Genera los 19 scripts batch (run_<job>.py) a partir del notebook de Felipe.
+"""Genera los 15 scripts batch (run_<job>.py) a partir del notebook de Felipe.
 
 Cada script = PRELUDE + celdas verbatim (sin tocar la lógica del problema).
 El prelude solo agrega: shim de display(), medición uniforme de tiempos
@@ -13,20 +13,13 @@ NOTEBOOK = Path(r"C:\Users\tomas\Desktop\Descarbonizacion_WCEP_Unificado_final"
                 r"\WCEP_Descarbonizacion_Unificado.ipynb")
 OUTDIR = Path(__file__).parent
 
-# Overrides mínimos por job (autorizado por Tomás 2026-07-16):
-# cell 66 trae epsilon_CO2_wcep=None y su búsqueda de emisiones FW no
-# calza con las columnas que produce la celda 59 -> se fija manualmente
-# el mismo epsilon que su gemela sin PADM (celda 63).
-OVERRIDES = {
-    "i39_A_padm_v2": [(
-        "epsilon_CO2_wcep = None",
-        "epsilon_CO2_wcep = 930756.144528 * 0.90  "
-        "# OVERRIDE batch: mismo valor que la celda 63 (gemela sin PADM); "
-        "el original era None y fallaba (ver make_scripts.py)",
-    )],
-}
+# Overrides mínimos por job. El único que existía cubría i39_A_padm_v2, que se
+# eliminó junto con el resto de la rama v2 (ver JOBS abajo).
+OVERRIDES = {}
 
 # job -> lista de índices de celdas de código (en orden de ejecución)
+# Los jobs i39_*_v2 se eliminaron el 2026-09-22: eran el experimento abandonado
+# de reescalado x365, con un bug conocido. v1 es el modelo publicado.
 JOBS = {
     "i14_fw":        [21, 24, 28],
     "i14_b_dual":    [21, 31],
@@ -35,15 +28,9 @@ JOBS = {
     "i14_A_padm":    [21, 38],
     "i39_fw":        [53, 56, 59],
     "i39_A_dual_v1": [53, 62],
-    "i39_A_dual_v2": [53, 63],
     "i39_A_padm_v1": [53, 65],
-    # cell 66 tiene epsilon_CO2_wcep=None y necesita las emisiones del FW
-    # en memoria -> incluye la celda 59 (FW), como en el orden del notebook
-    "i39_A_padm_v2": [53, 59, 66],
     "i39_b_dual_v1": [53, 69],
-    "i39_b_dual_v2": [53, 70],
     "i39_b_padm_v1": [53, 72],
-    "i39_b_padm_v2": [53, 73],
     "i57_fw":        [90, 93],
     "i57_A_dual":    [90, 95],
     "i57_A_padm":    [90, 97],

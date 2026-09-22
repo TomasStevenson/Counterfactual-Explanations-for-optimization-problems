@@ -386,9 +386,9 @@ cells.append(code(
 # ── helper generators ────────────────────────────────────────────────────────
 
 def decomp_cell(g, big_M_mult=1.0, time_limit=300,
-                master_out=0, max_iter=15, suffix="", comp_mode="sos1",
-                use_bs_hint=True, seed_patterns=False, mccormick_mu_factor=None,
-                mccormick_segments=1, bilinear_exact=False, obbt=False,
+                master_out=0, max_iter=15, suffix="",
+                use_bs_hint=True, seed_patterns=False,
+                bilinear_exact=True, obbt=False,
                 master_mip_focus=1, seed_interp=0):
     """Generate one DECOMP run cell.
 
@@ -433,10 +433,7 @@ def decomp_cell(g, big_M_mult=1.0, time_limit=300,
         f"    master_time_limit={time_limit},\n"
         f"    master_output_flag={master_out},\n"
         f"    master_mip_gap=1e-4,\n"
-        f'    comp_mode="{comp_mode}",\n'
         f'    seed_patterns={seed_patterns},\n'
-        f'    mccormick_mu_factor={mccormick_mu_factor},\n'
-        f'    mccormick_segments={mccormick_segments},\n'
         f'    bilinear_exact={bilinear_exact},\n'
         f'    obbt={obbt},\n'
         f'    master_mip_focus={master_mip_focus},\n'
@@ -448,54 +445,19 @@ def decomp_cell(g, big_M_mult=1.0, time_limit=300,
         f"    u_init=u_init_{g}, p_init=p_init_{g},\n"
         f"    on_time_init=on_t_{g}, off_time_init=off_t_{g},\n"
         f")\n"
-        f'print(f"\\nIEEE {g}-bus | comp={comp_mode} success={{{res}[\'success\']}} '
+        f'print(f"\\nIEEE {g}-bus | success={{{res}[\'success\']}} '
         f'F_opt={{{res}[\'F_opt\']:.4f}} iters={{{res}[\'iterations\']}} '
         f'cert={{{res}[\'certified\']}} gap={{{res}[\'gap\']:.4f}} '
         f'LB={{{res}[\'master_LB\']:.4f}}  patterns={{{res}[\'seen_patterns\']}}  '
         f'big_M_mult={big_M_mult}")\n'
     )
 
-def debug_fix_b_cell(g, comp_mode="bigM"):
-    """Self-consistent debug_fix_b: KKT block uses plain-optimal-at-b_hat."""
-    return code(
-        f'import json as _json\n'
-        f'_cp_path = "bs_{g}_checkpoint.json"\n'
-        f'if os.path.exists(_cp_path):\n'
-        f'    with open(_cp_path) as _fh:\n'
-        f'        _cp = _json.load(_fh)\n'
-        f'    _b_bs = np.array(_cp["best_b"], float)\n'
-        f'    print(f"[4a] IEEE {g}: B&S F_opt={{_cp[\'best_F\']:.4f}}")\n'
-        f'    _tester = UCDecomp4b(\n'
-        f'        oracle=oracle_{g}, data=DATA_{g}, idx=idx_{g}, cvec=cvec_{g},\n'
-        f'        foil_extra_constr_fn=foil_fn_{g},\n'
-        f'        b0=b0_{g}, b_bounds=(bL_{g}, bU_{g}), b_free_idx=b_free_idx_{g},\n'
-        f'        big_M_mu=big_M_mu_{g}, output_flag=0, verbose=True, w=w_{g},\n'
-        f'        big_M_multiplier=1.0, master_output_flag=0,\n'
-        f'        comp_mode="{comp_mode}",\n'
-        f'    )\n'
-        f'    _dbg = _tester.debug_fix_b(\n'
-        f'        b_test=_b_bs,\n'
-        f'        window_size=int(DATA_{g}.T), per_bus_neutrality=True,\n'
-        f'        u_init=u_init_{g}, p_init=p_init_{g},\n'
-        f'        on_time_init=on_t_{g}, off_time_init=off_t_{g},\n'
-        f'        iis_path=f"debug_fix_b_{g}_self.ilp",\n'
-        f'    )\n'
-        f'    print(f"[4a] IEEE {g} self-consistent (comp={comp_mode}): '
-        f'feasible={{_dbg[\'feasible\']}}  obj={{_dbg[\'obj\']}}  '
-        f'cut_slack={{_dbg.get(\'cut_slack\')}}")\n'
-        f'    del _tester\n'
-        f'else:\n'
-        f'    print(f"[4a] No B&S checkpoint for IEEE {g} — skipping.")\n'
-    )
-
-
 def bs_preprocess_cell(g, voll, max_nodes=200):
     """Branch-and-Sandwich preprocessing: runs B&S if the checkpoint is missing.
 
     Output: bs_{g}_checkpoint.json with the heuristic CE (b_hat).
-    This is the warm-start source that DECOMP needs to find any incumbent
-    in Iter 2+ (the master MIP is infeasible-to-explore without one — see
-    diagnostic in Section 4a / 4b.1b for evidence).
+    This is the warm-start source that gives DECOMP an incumbent from
+    iteration 1 instead of leaving the master to find one on its own.
 
     Fallback chain:
       1. Use cached checkpoint if present.
@@ -612,192 +574,63 @@ def plot_decomp_cell(g):
     )
 
 
-def cross_pattern_test_cell(g, comp_mode="bigM"):
-    """Cross-pattern debug_fix_b: extracts u_1 from Iter 1, tests at b_hat.
-
-    This is the actual model the DECOMP run() searches at Iter 2 (with b fixed
-    to b_hat).  Definitive test of whether the KKT block for u_1 admits the
-    known CE point b_hat.
-    """
-    return code(
-        f'import json as _json\n'
-        f'_cp_path = "bs_{g}_checkpoint.json"\n'
-        f'if os.path.exists(_cp_path):\n'
-        f'    with open(_cp_path) as _fh:\n'
-        f'        _cp = _json.load(_fh)\n'
-        f'    _b_bs = np.array(_cp["best_b"], float)\n'
-        f'    print(f"[4a-cross] IEEE {g}: B&S F_opt={{_cp[\'best_F\']:.4f}}")\n'
-        f'    _tester = UCDecomp4b(\n'
-        f'        oracle=oracle_{g}, data=DATA_{g}, idx=idx_{g}, cvec=cvec_{g},\n'
-        f'        foil_extra_constr_fn=foil_fn_{g},\n'
-        f'        b0=b0_{g}, b_bounds=(bL_{g}, bU_{g}), b_free_idx=b_free_idx_{g},\n'
-        f'        big_M_mu=big_M_mu_{g}, output_flag=0, verbose=True, w=w_{g},\n'
-        f'        big_M_multiplier=1.0, master_output_flag=0,\n'
-        f'        comp_mode="{comp_mode}",\n'
-        f'    )\n'
-        f'    # Step 1: replicate Iter 1 of run() to get u_1\n'
-        f'    _b_1, _u_1, _F_1 = _tester.iter1_pattern(\n'
-        f'        window_size=int(DATA_{g}.T), per_bus_neutrality=True,\n'
-        f'        u_init=u_init_{g}, p_init=p_init_{g},\n'
-        f'        on_time_init=on_t_{g}, off_time_init=off_t_{g},\n'
-        f'    )\n'
-        f'    if _u_1 is None:\n'
-        f'        print("[4a-cross] iter1_pattern failed — skipping.")\n'
-        f'    else:\n'
-        f'        # Step 2: test KKT block for u_1 with b fixed to b_hat\n'
-        f'        _dbg = _tester.debug_fix_b(\n'
-        f'            b_test=_b_bs, u_j_override=_u_1,\n'
-        f'            window_size=int(DATA_{g}.T), per_bus_neutrality=True,\n'
-        f'            u_init=u_init_{g}, p_init=p_init_{g},\n'
-        f'            on_time_init=on_t_{g}, off_time_init=off_t_{g},\n'
-        f'            iis_path=f"debug_fix_b_{g}_cross.ilp",\n'
-        f'        )\n'
-        f'        print(f"[4a-cross] IEEE {g} cross-pattern (comp={comp_mode}): '
-        f'feasible={{_dbg[\'feasible\']}}  obj={{_dbg[\'obj\']}}  '
-        f'cut_slack={{_dbg.get(\'cut_slack\')}}")\n'
-        f'        print(f"           interpretation: tiny cut_slack ⇒ b_hat is a '
-        f'corner of feasible region ⇒ B&B will struggle even though formulation '
-        f'is correct.")\n'
-        f'    del _tester\n'
-        f'else:\n'
-        f'    print(f"[4a-cross] No B&S checkpoint for IEEE {g} — skipping.")\n'
-    )
-
-
-# ── Section 4a · debug_fix_b diagnostics ─────────────────────────────────────
+# ── Section 4b · Branch-and-Sandwich preprocessing ───────────────────────────
 cells.append(md(
-    "---\n## Section 4a · Diagnostic — `debug_fix_b` with B&S solution\n\n"
-    "Two tests per grid, both with `b` fixed to the known CE `b_hat` from B&S "
-    "and `comp_mode='bigM'` (matches Section 4b):\n\n"
-    "1. **Self-consistent** — KKT block built for `u^* = plain-optimal-at-b_hat`. "
-    "Verifies formulation correctness; should always be feasible since `b_hat` IS a CE.\n"
-    "2. **Cross-pattern** — KKT block built for `u_1` (the pattern DECOMP discovers "
-    "at Iter 1, from a *different* `b_1`).  This is the actual model DECOMP's "
-    "run() solves at Iter 2 with `b` fixed.\n\n"
-    "**`cut_slack`** = `LP_cost(u^j, b_hat) − foil_cost` at the solution.  "
-    "Tiny slack (< 1e-2) ⇒ the optimality cut is nearly binding at `b_hat`, so the "
-    "feasible region is essentially a single point — B&B has to land on it exactly, "
-    "which explains why Section 4b times out even though the formulation is correct."
+    "---\n## Section 4b · Branch-and-Sandwich preprocessing\n\n"
+    "Per grid, run B&S once (a fast no-op if `bs_<grid>_checkpoint.json` already "
+    "exists) to produce the warm-start CE that every DECOMP section below uses as "
+    "`b_hat_hint`.  B&S solves only LPs, runs in minutes, and gives DECOMP an "
+    "incumbent from iteration 1 instead of leaving the master to find one on its "
+    "own."
 ))
-cells.append(md("### 4a.1 · IEEE 14-bus — self-consistent"))
-cells.append(debug_fix_b_cell("14", comp_mode="bigM"))
-cells.append(md("### 4a.2 · IEEE 14-bus — cross-pattern (u_1 at b_hat)"))
-cells.append(cross_pattern_test_cell("14", comp_mode="bigM"))
-cells.append(md("### 4a.3 · IEEE 39-bus — self-consistent"))
-cells.append(debug_fix_b_cell("39", comp_mode="bigM"))
-cells.append(md("### 4a.4 · IEEE 39-bus — cross-pattern"))
-cells.append(cross_pattern_test_cell("39", comp_mode="bigM"))
-cells.append(md("### 4a.5 · IEEE 57-bus — self-consistent"))
-cells.append(debug_fix_b_cell("57", comp_mode="bigM"))
-cells.append(md("### 4a.6 · IEEE 57-bus — cross-pattern"))
-cells.append(cross_pattern_test_cell("57", comp_mode="bigM"))
-
-# ── Section 4b · Full pipeline: B&S preprocess → DECOMP → plot ────────────────
-cells.append(md(
-    "---\n## Section 4b · Full self-contained pipeline\n\n"
-    "Per grid: **B&S preprocessing** (runs only if `bs_<grid>_checkpoint.json` is "
-    "missing) → **DECOMP** with that B&S CE as the warm-start hint → "
-    "**plot** the resulting CE.\n\n"
-    "Why B&S is required as a preprocessor: the DECOMP master MIP at Iter 2+ has a "
-    "bigM-complementarity structure where Gurobi's default heuristics cannot "
-    "find any integer-feasible solution (demonstrated in 4b.1b cold-start: 67K "
-    "B&B nodes, 0 incumbents in 900s).  B&S only solves LPs (no MIP), runs in "
-    "minutes, and produces a heuristic CE that DECOMP uses to bootstrap.  After "
-    "the first checkpoint exists the B&S cell is a fast no-op."
-))
-
-# IEEE 14
 cells.append(md("### 4b.1 · IEEE 14-bus"))
-cells.append(md("**Step 1/3** — B&S preprocessing (skipped if checkpoint exists)"))
 cells.append(bs_preprocess_cell("14", voll=20000.0, max_nodes=200))
-cells.append(md("**Step 2/3** — DECOMP refinement (warm-started from B&S)"))
-cells.append(decomp_cell("14", big_M_mult=1.0, time_limit=900,
-                          master_out=1, max_iter=15, suffix="",
-                          comp_mode="bigM"))
-cells.append(md("**Step 3/3** — Plot result"))
-cells.append(plot_decomp_cell("14"))
-
-# Cold-start ablation (keep for reference; expected to fail at Iter 2)
-cells.append(md(
-    "### 4b.1b · IEEE 14-bus — ABLATION: NO warm-start (cold start)\n\n"
-    "Same as 4b.1 but `use_bs_hint=False`: no B&S CE, no `F ≤ F_hint`, no "
-    "analytic warm-start.  Expected to halt after Iter 1 with `success=False` "
-    "and `termination_reason='time_limit_no_incumbent'` — empirical evidence "
-    "that the warm-start is structurally required, not an optimization shortcut."
-))
-cells.append(decomp_cell("14", big_M_mult=1.0, time_limit=900,
-                          master_out=1, max_iter=15, suffix="_nohint",
-                          comp_mode="bigM", use_bs_hint=False))
-
-# IEEE 39
 cells.append(md("### 4b.2 · IEEE 39-bus"))
-cells.append(md("**Step 1/3** — B&S preprocessing"))
 cells.append(bs_preprocess_cell("39", voll=20000.0, max_nodes=200))
-cells.append(md("**Step 2/3** — DECOMP refinement"))
-cells.append(decomp_cell("39", big_M_mult=1.0, time_limit=900,
-                          master_out=1, max_iter=15, suffix="",
-                          comp_mode="bigM"))
-cells.append(md("**Step 3/3** — Plot result"))
-cells.append(plot_decomp_cell("39"))
-
-# IEEE 57
 cells.append(md("### 4b.3 · IEEE 57-bus"))
-cells.append(md("**Step 1/3** — B&S preprocessing"))
 cells.append(bs_preprocess_cell("57", voll=500.0, max_nodes=200))
-cells.append(md("**Step 2/3** — DECOMP refinement"))
-cells.append(decomp_cell("57", big_M_mult=1.0, time_limit=900,
-                          master_out=1, max_iter=15, suffix="",
-                          comp_mode="bigM"))
-cells.append(md("**Step 3/3** — Plot result"))
-cells.append(plot_decomp_cell("57"))
 
-# ── Section 4d · LB-stagnation Fix 2 (strong duality + McCormick) ─────────────
+# ── Section 4d · Strong-duality master (McCormick bilinear) ───────────────────
 cells.append(md(
-    "---\n## Section 4d · Fix 2: `comp_mode=\"strongdual\"` (LB-stagnation experiment)\n\n"
-    "Same B&S warm-start pipeline as 4b, but with `comp_mode=\"strongdual\"`.  "
-    "Instead of encoding complementarity per pair (big-M / indicator / SOS1), the "
-    "dispatch LP's optimality is enforced by a single **strong-duality equality** "
-    "`cᵀxʲ = dual_obj` together with the primal-feasibility and "
+    "---\n## Section 4d · Strong-duality master, McCormick bilinear\n\n"
+    "The dispatch LP's optimality is enforced by a single **strong-duality "
+    "equality** `cᵀxʲ = dual_obj` together with the primal-feasibility and "
     "stationarity constraints already in each KKT block.  For an LP this triple "
     "is equivalent to optimality, so **no `z` binaries are needed at all** — the "
     "only integer variables left in the master are the foil commitments "
     "`u_foil`.  The single nonlinearity, the dual term "
     "`−Σ b[ell]·(μ_p+μ_m)` on free lines (bilinear because "
-    "`b` is a master variable), is linearised with **McCormick** auxiliaries "
-    "`w = b·μ`.  See `DECOMP_lb_stagnation.md` Fix 2.\n\n"
-    "Expected vs 4b: the master MILP shrinks dramatically (thousands of `z` "
-    "binaries removed), each iteration solves to proven optimality instead of "
-    "hitting the time limit, the Root LP becomes non-zero (McCormick couples `b` "
-    "to the duals), and `ObjBound` lifts off 0.  Results stored in "
-    "`res_14_sd`, `res_39_sd`, `res_57_sd`."
+    "`b` is a master variable), is here linearised with **McCormick** auxiliaries "
+    "`w = b·μ`.  Section 4g replaces that envelope with the exact product, which "
+    "is the published setting; this section is the looser baseline it improves "
+    "on.  Results stored in `res_14_sd`, `res_39_sd`, `res_57_sd`."
 ))
 
 # IEEE 14 strongdual
-cells.append(md("### 4d.1 · IEEE 14-bus — strongdual"))
+cells.append(md("### 4d.1 · IEEE 14-bus — McCormick"))
 cells.append(decomp_cell("14", big_M_mult=1.0, time_limit=900,
                           master_out=1, max_iter=15, suffix="_sd",
-                          comp_mode="strongdual"))
+                          bilinear_exact=False))
 
 # IEEE 39 strongdual
-cells.append(md("### 4d.2 · IEEE 39-bus — strongdual"))
+cells.append(md("### 4d.2 · IEEE 39-bus — McCormick"))
 cells.append(decomp_cell("39", big_M_mult=1.0, time_limit=900,
                           master_out=1, max_iter=15, suffix="_sd",
-                          comp_mode="strongdual"))
+                          bilinear_exact=False))
 
 # IEEE 57 strongdual
-cells.append(md("### 4d.3 · IEEE 57-bus — strongdual"))
+cells.append(md("### 4d.3 · IEEE 57-bus — McCormick"))
 cells.append(decomp_cell("57", big_M_mult=1.0, time_limit=900,
                           master_out=1, max_iter=15, suffix="_sd",
-                          comp_mode="strongdual"))
+                          bilinear_exact=False))
 
-# Two-way comparison: bigM vs strongdual
+# Two-way comparison: McCormick (4d) vs exact + OBBT (4g)
 cells.append(md(
-    "### 4d.4 · Comparison summary (bigM vs strongdual)\n"
-    "Per-grid `F_opt / LB / gap%`.  Fix 2 (strongdual) should show a much higher "
-    "`master_LB` and smaller `gap_pct` than bigM (whose ObjBound stagnates near 0); "
-    "`F_opt` should match (the incumbent CE is found the same way — only the bound "
-    "changes).  strongdual is the valid-LB baseline that Section 4g (exact + OBBT) "
-    "tightens further."
+    "### 4d.4 · Comparison summary (McCormick vs exact + OBBT)\n"
+    "Per-grid `F_opt / LB / gap%`.  Run this after Section 4g.  The exact bilinear "
+    "master should show a higher `master_LB` and a smaller `gap_pct` than the "
+    "McCormick envelope, while `F_opt` matches — the incumbent CE is found the same "
+    "way, only the bound changes."
 ))
 cells.append(code(
     "def _fmt(r):\n"
@@ -806,13 +639,13 @@ cells.append(code(
     "    return f\"{r['F_opt']:>9.4f} {r['master_LB']:>9.4f} {r['gap_pct']:>6.2f}%\"\n"
     "\n"
     "hdr = f\"{'F_opt':>9} {'LB':>9} {'gap%':>7}\"\n"
-    "print(f\"{'':<13} | {'=== bigM ===':^27} | {'== strongdual ==':^27}\")\n"
+    "print(f\"{'':<13} | {'== McCormick ==':^27} | {'= exact + OBBT =':^27}\")\n"
     "print(f\"{'Grid':<13} | {hdr} | {hdr}\")\n"
     "print('-' * 71)\n"
     "for label, g in [('IEEE 14-bus', '14'), ('IEEE 39-bus', '39'), ('IEEE 57-bus', '57')]:\n"
-    "    r_bm = globals().get(f'res_{g}')\n"
     "    r_sd = globals().get(f'res_{g}_sd')\n"
-    "    print(f'{label:<13} | {_fmt(r_bm)} | {_fmt(r_sd)}')\n"
+    "    r_ex = globals().get(f'res_{g}_obbt')\n"
+    "    print(f'{label:<13} | {_fmt(r_sd)} | {_fmt(r_ex)}')\n"
 ))
 
 # ── Section 4g · EXACT bilinear + root OBBT (rigorous valid certificate) ──────
@@ -872,19 +705,19 @@ cells.append(md(
 cells.append(md("### 4g.1 · IEEE 14-bus — exact + OBBT (lean master, MIPFocus=3) — master-scaling-bound"))
 cells.append(decomp_cell("14", big_M_mult=1.0, time_limit=900,
                           master_out=1, max_iter=4, suffix="_obbt",
-                          comp_mode="strongdual", seed_patterns=True,
+                          seed_patterns=True,
                           bilinear_exact=True, obbt=True, master_mip_focus=3,
                           seed_interp=0))
 cells.append(md("### 4g.2 · IEEE 39-bus — exact + OBBT + interior seeds — **CERTIFIES 0.00%**"))
 cells.append(decomp_cell("39", big_M_mult=1.0, time_limit=900,
                           master_out=1, max_iter=6, suffix="_obbt",
-                          comp_mode="strongdual", seed_patterns=True,
+                          seed_patterns=True,
                           bilinear_exact=True, obbt=True, master_mip_focus=3,
                           seed_interp=3))
 cells.append(md("### 4g.3 · IEEE 57-bus — exact + OBBT (lean master, MIPFocus=3) — master-scaling-bound"))
 cells.append(decomp_cell("57", big_M_mult=1.0, time_limit=900,
                           master_out=1, max_iter=4, suffix="_obbt",
-                          comp_mode="strongdual", seed_patterns=True,
+                          seed_patterns=True,
                           bilinear_exact=True, obbt=True, master_mip_focus=3,
                           seed_interp=0))
 cells.append(md(
@@ -914,11 +747,11 @@ cells.append(md(
     "---\n## Section 5 · Results summary\n\n"
     "The headline numbers are the **rigorous exact + OBBT certificates** (Section 4g, "
     "`res_<g>_obbt`): a *strict* CE as the upper bound and a VALID lower bound. "
-    "`bigM` (Section 4b, `res_<g>`) is shown alongside for the incumbent-quality "
-    "comparison, but its `LB=0` makes its gap meaningless as a certificate."
+    "The McCormick run (Section 4d, `res_<g>_sd`) is shown alongside for the "
+    "bound-quality comparison."
 ))
 
-# Summary table — headline = exact+OBBT (4g), with bigM incumbent alongside
+# Summary table — headline = exact+OBBT (4g), with the McCormick run alongside
 cells.append(code(
     "def _g(res):\n"
     "    if res is None or not res.get('success'):\n"
@@ -928,13 +761,13 @@ cells.append(code(
     "            f\"{res['gap_pct']:.2f}%\", cert)\n"
     "\n"
     "print('Headline: exact + OBBT (Section 4g) — strict CE + VALID LB')\n"
-    "print(f\"{'Grid':<13} {'F_opt(UB)':>11} {'LB':>10} {'Gap%':>9} {'Certified':>11}  | {'bigM F':>9}\")\n"
+    "print(f\"{'Grid':<13} {'F_opt(UB)':>11} {'LB':>10} {'Gap%':>9} {'Certified':>11}  | {'McC LB':>9}\")\n"
     "print('-' * 74)\n"
     "for label, g in [('IEEE 14-bus','14'), ('IEEE 39-bus','39'), ('IEEE 57-bus','57')]:\n"
-    "    ro = globals().get(f'res_{g}_obbt'); rb = globals().get(f'res_{g}')\n"
+    "    ro = globals().get(f'res_{g}_obbt'); rs = globals().get(f'res_{g}_sd')\n"
     "    F,LB,gp,ct = _g(ro)\n"
-    "    bF = f\"{rb['F_opt']:.4f}\" if (rb and rb.get('success')) else 'N/A'\n"
-    "    print(f\"{label:<13} {F:>11} {LB:>10} {gp:>9} {ct:>11}  | {bF:>9}\")\n"
+    "    sLB = f\"{rs['master_LB']:.4f}\" if (rs and rs.get('success')) else 'N/A'\n"
+    "    print(f\"{label:<13} {F:>11} {LB:>10} {gp:>9} {ct:>11}  | {sLB:>9}\")\n"
 ))
 
 # CE verification (on the rigorous exact+OBBT incumbent)

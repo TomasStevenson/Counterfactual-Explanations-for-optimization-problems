@@ -1,12 +1,12 @@
-"""Correctness check for comp_mode='strongdual'.
+"""Correctness check for the strong-duality master.
 
-A valid CE b_BS (from Branch-and-Sandwich) MUST be feasible in the strongdual
-master with its own plain-optimal KKT block.  If debug_fix_b reports INFEASIBLE
-(or obj >> F(b_BS)), the strong-duality + McCormick formulation is excluding
-valid CEs -> ObjBound would be an INVALID (too-high) lower bound.
+A valid CE b_BS (from Branch-and-Sandwich) MUST be feasible in the master with
+its own plain-optimal KKT block.  If debug_fix_b reports INFEASIBLE (or
+obj >> F(b_BS)), the formulation is excluding valid CEs -> ObjBound would be an
+INVALID (too-high) lower bound.
 
 Usage:  .../ce-env/python.exe _check_strongdual_valid.py \
-            [grid] [comp_mode] [bigM] [factor|none] [exact|K] [obbt|noobbt]
+            [grid] [bigM] [exact|approx] [obbt|noobbt] [obbt_iter]
 """
 import os, sys, json
 import numpy as np
@@ -24,15 +24,12 @@ from _decomp_repro_helpers import (
 )
 
 GRID = sys.argv[1] if len(sys.argv) > 1 else "39"
-COMP = sys.argv[2] if len(sys.argv) > 2 else "strongdual"
-BIGM = float(sys.argv[3]) if len(sys.argv) > 3 else 1e4
-FACTOR = (float(sys.argv[4]) if (len(sys.argv) > 4 and sys.argv[4].lower() != "none")
-          else None)  # McCormick mu-box factor
-_seg_arg = sys.argv[5] if len(sys.argv) > 5 else "1"        # "exact" or K segments
-EXACT = (_seg_arg.lower() == "exact")
-SEGS = 1 if EXACT else int(_seg_arg)
-OBBT = (len(sys.argv) > 6 and sys.argv[6].lower() == "obbt")
-OBBT_ITER = int(sys.argv[7]) if len(sys.argv) > 7 else 2   # # root OBBT passes
+BIGM = float(sys.argv[2]) if len(sys.argv) > 2 else 1e4
+# "exact" = exact bilinear b·μ (the published setting); anything else = the
+# McCormick envelope, which is what _obbt_root builds internally.
+EXACT = (sys.argv[3].lower() == "exact") if len(sys.argv) > 3 else True
+OBBT = (len(sys.argv) > 4 and sys.argv[4].lower() == "obbt")
+OBBT_ITER = int(sys.argv[5]) if len(sys.argv) > 5 else 2   # # root OBBT passes
 ALPHA = 0.10
 DATA_DIR = os.path.join(os.path.dirname(__file__), "Data")
 _fname = {"14": "ieee14_enhanced.json", "39": "ieee39_newengland.json",
@@ -73,26 +70,21 @@ with open(f"bs_{GRID}_checkpoint.json") as fh:
     bs = json.load(fh)
 b_bs = np.array(bs["best_b"], float)
 F_bs = float(bs["best_F"])
-print(f"=== grid=IEEE{GRID} comp={COMP}  B&S F={F_bs:.4f} ===")
+print(f"=== grid=IEEE{GRID}  B&S F={F_bs:.4f} ===")
 
 # Confirm b_bs is a real CE per the oracle
 vp, _, _ = oracle.solve_plain(b_bs)
 vd, _, _ = oracle.solve_foil(b_bs)
 print(f"oracle at b_BS: v_plain={vp:.2f}  v_foil={vd:.2f}  CE_ok={vd <= vp + 1e-3}")
 
-print(f"big_M_mu={BIGM:g}  mccormick_mu_factor={FACTOR}  segments={SEGS}  "
-      f"exact={EXACT}  obbt={OBBT}")
+print(f"big_M_mu={BIGM:g}  exact={EXACT}  obbt={OBBT}")
 dec = UCDecomp4b(
     oracle=oracle, data=DATA, idx=idx, cvec=cvec, foil_extra_constr_fn=foil_fn,
     b0=b0, b_bounds=(bL, bU), b_free_idx=free_idx,
-    big_M_mu=BIGM, verbose=True, w=w, comp_mode=COMP,
-    b_hat_hint=b_bs, mccormick_mu_factor=FACTOR, mccormick_segments=SEGS,
+    big_M_mu=BIGM, verbose=True, w=w,
+    b_hat_hint=b_bs,
     bilinear_exact=EXACT, obbt=OBBT, obbt_iter=OBBT_ITER,
 )
-# debug_fix_b doesn't call run(), so estimate the mu-box up front (as run() would)
-if FACTOR is not None and COMP == "strongdual":
-    b_ws = b0.copy(); b_ws[free_idx] = bU[free_idx]
-    dec._estimate_mu_box([b0, b_bs, b_ws], T, True, p_init)
 F_bs_local = dec.F(b_bs)
 print(f"F(b_BS) under local weights = {F_bs_local:.4f}")
 
@@ -100,7 +92,7 @@ if not OBBT:
     res = dec.debug_fix_b(
         b_test=b_bs, window_size=T, per_bus_neutrality=True,
         u_init=u_init, p_init=p_init, on_time_init=on_t, off_time_init=off_t,
-        iis_path=f"_chk_{GRID}_{COMP}.ilp", verbose=False,
+        iis_path=f"_chk_{GRID}.ilp", verbose=False,
     )
     print(f"debug_fix_b: feasible={res['feasible']}  obj={res['obj']}  "
           f"cut_slack={res.get('cut_slack')}")
@@ -138,7 +130,7 @@ else:
     feas = st in (GRB.OPTIMAL, GRB.SUBOPTIMAL) and m.SolCount > 0
     print(f"[validate-obbt] solve status={st}  obj={obj_val}  SolCount={m.SolCount}")
     if not feas:
-        iis_path = f"_chk_{GRID}_{COMP}_obbt.ilp"
+        iis_path = f"_chk_{GRID}_obbt.ilp"
         try:
             m.computeIIS(); m.write(iis_path)
             print(f"[validate-obbt] IIS → {iis_path}")

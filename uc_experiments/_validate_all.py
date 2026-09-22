@@ -16,8 +16,8 @@ import os, sys, subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 GRIDS = ["14", "39", "57"]
-# slot args: grid comp bigM factor seg obbt  (matches _check_strongdual_valid.py)
-COMMON = ["strongdual", "1e4", "none", "exact", "obbt"]
+# slot args: grid bigM exact obbt  (matches _check_strongdual_valid.py)
+COMMON = ["1e4", "exact", "obbt"]
 
 def run_grid(g):
     cmd = [PY, os.path.join(HERE, "_check_strongdual_valid.py"), g] + COMMON

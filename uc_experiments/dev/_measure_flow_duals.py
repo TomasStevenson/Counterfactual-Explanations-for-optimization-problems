@@ -42,7 +42,7 @@ oracle = UCWeakWCEOracle(
 dec = UCDecomp4b(oracle=oracle, data=DATA, idx=idx, cvec=cvec,
                  foil_extra_constr_fn=foil_fn, b0=b0, b_bounds=(bL, bU),
                  b_free_idx=free_idx, big_M_mu=1e4, verbose=False, w=w,
-                 comp_mode="strongdual")
+                 )
 VOLL = float(DATA.voll)
 mcc = max(float(np.max(r.curt_cost)) for r in DATA.rens) if DATA.rens else 0.0
 M_mu = max(1e4, 2*VOLL + 2*mcc)
